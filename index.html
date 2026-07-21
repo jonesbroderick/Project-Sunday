@@ -243,6 +243,8 @@
   .cat-drop-target.cat-drop-hover{background:var(--blue-bg)!important;box-shadow:inset 0 0 0 2px var(--blue)}
   .filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:1rem}
   .filter-btn{font-size:13.5px;padding:4px 12px;border-radius:20px;cursor:pointer;border:1px solid var(--border);background:var(--bg2);color:var(--text2);transition:background .12s,color .12s,border-color .12s}
+  .select-toggle-btn{width:29px;height:29px;flex-shrink:0;border-radius:50%;border:1px solid var(--border);background:var(--bg2);color:var(--text2);font-size:13.5px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
+  .select-toggle-btn.active{background:#ffffff;color:#0c0c0c;border-color:#ffffff}
   .filter-btn.active{background:var(--blue-bg);color:var(--blue-text);border-color:var(--blue)}
   .filter-btn.grp-pill:hover{filter:brightness(1.2)}
   /* Phase 8: per-group sub-tabs (Due Today / Planned / All Tasks / Categories) — each is its own
@@ -657,6 +659,13 @@
      never push the footer off-screen — scrolling (when content is tall) happens inside the modal,
      never on the page behind it. */
   .modal{background:var(--bg2);border-radius:12px;padding:0;width:840px;max-width:95vw;max-height:88vh;border:1px solid rgba(255,255,255,.22);display:flex;flex-direction:column;overflow:hidden}
+  /* 2026-07-22: moved off an inline style="width:520px" on the Bulk Edit modal specifically so the
+     mobile full-screen override below (.modal{width:100vw...} inside @media max-width:700px) can
+     still win there — an inline style always beats a stylesheet rule no matter what, so Bulk Edit
+     would have stayed stuck at a fixed 520px on Dolo once it got a mobile entry point (the new
+     3-dot select button). Same specificity as .modal itself, so normal source order still decides:
+     this narrows it on desktop, the later mobile media query still overrides it on a phone. */
+  .modal-narrow{width:520px}
   .modal-header{display:flex;justify-content:space-between;align-items:center;padding:1.5rem 1.5rem 1rem;flex-shrink:0}
   .modal-body{padding:0 1.5rem 4px;overflow-y:auto;flex:1;min-height:0}
   .modal-title{font-size:17.5px;font-weight:500}
@@ -1136,6 +1145,10 @@
   .mobile-quick-add-btn{background:var(--blue);color:#fff;border:none;border-radius:8px;padding:0 16px;font-size:20px;font-weight:600}
   .mobile-task-row{display:flex;align-items:center;gap:10px;background:var(--bg2);border-left:3px solid var(--border);border-radius:8px;padding:11px 12px;margin-bottom:7px;cursor:pointer}
   .mobile-task-row.done{opacity:.55}
+  .mobile-task-row.selected{background:var(--blue-bg)}
+  .mobile-agenda-check.selected{border-color:var(--blue-text);background:var(--blue-text);color:#0c0c0c}
+  .mobile-select-btn{flex-shrink:0;width:34px;height:34px;border-radius:50%;border:1px solid var(--border);background:var(--bg2);color:var(--text2);font-size:14px}
+  .mobile-select-btn.active{background:var(--blue-text);border-color:var(--blue-text);color:#0c0c0c}
   .mobile-task-meta{display:flex;gap:8px;align-items:center;margin-top:2px}
   .mobile-task-due{font-size:11.5px;color:var(--amber-text)}
   .mobile-task-cat{font-size:11.5px;font-weight:600}
@@ -1205,6 +1218,12 @@
     .subtask-check{width:21px;height:21px}
     .subtask-remove{font-size:19px;padding:6px}
     .form-star-btn,.form-lock-btn{font-size:17px;padding:6px}
+    /* 2026-07-22: the bulk-select action bar (count + Cancel + Bulk Edit + Delete) is shared as-is
+       with desktop (see renderMobileTasksTab) — on a narrow phone width those 4 pieces don't fit
+       one row, so let them wrap instead of forcing a side-to-side scroll/pan (same "no horizontal
+       drag" rule as the edit-task popup above). */
+    .select-action-bar{flex-wrap:wrap;row-gap:8px}
+    .select-action-count{flex-basis:100%;margin-right:0}
     /* The Focus timer's floating button/panel lives outside .app (so it normally floats over every
        desktop view) — Brody explicitly doesn't want it on mobile at all, see "remove the focus tab." */
     #focus-fab,#focus-panel{display:none !important}
@@ -1289,7 +1308,7 @@
         <div class="stats-mini mobile-stats-mini">
           <div class="stat-mini stat-today" onclick="setMobileTab('tasks');setMobileGrpFilter('today')" title="View tasks due today"><i class="fa fa-star"></i><span class="stat-mini-val" id="stat-total-m">0</span><span class="stat-mini-label">today</span></div>
           <div class="stat-mini stat-completed" onclick="setMobileTab('tasks')" title="View all tasks"><i class="fa fa-check-circle"></i><span class="stat-mini-val" id="stat-done-m">0</span><span class="stat-mini-label">done</span></div>
-          <div class="stat-mini stat-overdue-box" id="stat-overdue-card-m" onclick="setMobileTab('tasks')" title="View overdue tasks"><i class="fa fa-exclamation-circle"></i><span class="stat-mini-val" id="stat-overdue-m">0</span><span class="stat-mini-label">overdue</span></div>
+          <div class="stat-mini stat-overdue-box" id="stat-overdue-card-m" onclick="setMobileTab('tasks');setMobileGrpFilter('overdue')" title="View overdue tasks"><i class="fa fa-exclamation-circle"></i><span class="stat-mini-val" id="stat-overdue-m">0</span><span class="stat-mini-label">overdue</span></div>
         </div>
         <button type="button" class="mobile-search-btn" id="mobile-search-btn" onclick="toggleMobileSearch()" title="Search tasks"><i class="fa fa-search"></i></button>
       </div>
@@ -1440,7 +1459,7 @@
 </div>
 
 <div class="overlay" id="bulk-edit-modal" style="display:none" onclick="closeBulkEditModalOutside(event)">
-  <div class="modal" style="width:520px">
+  <div class="modal modal-narrow">
     <div class="modal-header">
       <div class="modal-title" id="bulk-edit-title">Edit tasks</div>
       <button class="close-btn" onclick="closeBulkEditModal()">×</button>
@@ -2166,11 +2185,30 @@ function renderMobileTasksTab(){
     const isActive=mobileGrpFilter===UNGROUPED_GRP;
     pillsHTML+=`<button type="button" class="mobile-grp-pill${isActive?' active':''}" style="${isActive?'background:#8a8a8a;border-color:#8a8a8a':''}" onclick="setMobileGrpFilter('${UNGROUPED_GRP}')">Tasks</button>`;
   }
+  {
+    // 2026-07-22, per Brody: Blanc has a dedicated red Overdue pill/list (a flat, live view of
+    // every isOverdue() task across every group) and Dolo didn't — the header's overdue stat was
+    // clickable but had nowhere to actually take you. Same pill, same red styling, same isOverdue()
+    // list as desktop's showOverdueView(), just rendered as mobile rows below instead of cards.
+    const overdueCount=tasks.filter(isOverdue).length;
+    const isActive=mobileGrpFilter==='overdue';
+    const style=isActive?'background:#ff6b6b;border-color:#ff6b6b;color:#0c0c0c':'background:#ff6b6b1a;border-color:#ff6b6b40;color:#ff8a8a';
+    pillsHTML+=`<button type="button" class="mobile-grp-pill${isActive?' active':''}" style="${style}" onclick="setMobileGrpFilter('overdue')"><i class="fa fa-exclamation-circle" style="margin-right:4px"></i>Overdue${overdueCount?` <span class="pill-count-badge">${overdueCount}</span>`:''}</button>`;
+  }
+  {
+    // 2026-07-22, per Brody: "3 little dots after the overdue group" to pick tasks for bulk
+    // edit/delete, right on Dolo — shares the exact same allTasksSelectMode/allTasksSelections
+    // state (and the same Bulk Edit modal/Delete confirm) desktop's own "Select" toggle uses, so it
+    // acts on whichever pill/list is currently showing, no separate mobile select logic to keep
+    // in sync. See mobileTaskRowHTML for how a row behaves differently while this is on.
+    const selActive=allTasksSelectMode;
+    pillsHTML+=`<button type="button" class="mobile-select-btn${selActive?' active':''}" onclick="toggleAllTasksSelectMode()" title="${selActive?'Cancel select':'Select tasks to bulk-edit or delete'}"><i class="fa fa-ellipsis-h"></i></button>`;
+  }
   pillsHTML+='</div>';
 
-  // Category sub-pills — only meaningful once a real group is selected (Today/Tasks have none).
+  // Category sub-pills — only meaningful once a real group is selected (Today/Tasks/Overdue have none).
   let catPillsHTML='';
-  if(mobileGrpFilter&&mobileGrpFilter!=='today'&&mobileGrpFilter!==UNGROUPED_GRP){
+  if(mobileGrpFilter&&mobileGrpFilter!=='today'&&mobileGrpFilter!==UNGROUPED_GRP&&mobileGrpFilter!=='overdue'){
     const cc=GRP_COLORS[mobileGrpFilter]||'#888';
     const cats=allCategoriesUsed(mobileGrpFilter);
     const validSel=mobileCategoryFilter===CATEGORY_PILL_UNCATEGORIZED||cats.includes(mobileCategoryFilter);
@@ -2188,7 +2226,9 @@ function renderMobileTasksTab(){
     catPillsHTML+='</div>';
   }
 
-  const quickAddHTML=`<div class="mobile-quick-add-row">
+  // No quick-add on the Overdue list — matches desktop's own Overdue pill, which is a pure filtered
+  // view (nothing gets "added" overdue; it just collects whatever's already past due elsewhere).
+  const quickAddHTML=mobileGrpFilter==='overdue' ? '' : `<div class="mobile-quick-add-row">
     <input type="text" id="mobile-quick-add-input" class="mobile-quick-add-input" placeholder="Add a task" onkeydown="mobileQuickAddKey(event)">
     <button type="button" class="mobile-quick-add-btn" onclick="mobileQuickAddTask()">+</button>
   </div>`;
@@ -2224,6 +2264,11 @@ function renderMobileTasksTab(){
     const base=tasks.filter(t=>!t.locked&&!t.isCategoryBlock&&!t.group);
     open=base.filter(t=>!t.done).sort(byDueTime);
     doneList=base.filter(t=>t.done).sort(byDueTime);
+  } else if(mobileGrpFilter==='overdue'){
+    // Same flat, cross-group isOverdue() list as desktop's showOverdueView() — isOverdue() already
+    // excludes done/locked/recurring tasks, so there's never a "completed" bucket to toggle here.
+    open=tasks.filter(isOverdue).sort(byDueTime);
+    doneList=[];
   } else {
     const isUncategorized=mobileCategoryFilter===CATEGORY_PILL_UNCATEGORIZED;
     const base=isUncategorized
@@ -2240,7 +2285,11 @@ function renderMobileTasksTab(){
   const completedBtn=doneList.length
     ? `<button type="button" class="mobile-show-completed-btn" onclick="toggleMobileShowCompleted()">${mobileShowCompleted?'Hide':'Show'} ${doneList.length} completed</button>`
     : '';
-  el.innerHTML=pillsHTML+catPillsHTML+quickAddHTML+listHTML+completedBtn;
+  // Reuses desktop's own select-mode action bar/modal as-is (count, Cancel, Bulk Edit, Delete —
+  // same openBulkEditModal()/bulkDeleteSelected() functions) rather than building a second, mobile-
+  // only version — one bulk-edit flow for the whole app, just triggered from a different button.
+  const selectBarHTML=selectActionBarHTML();
+  el.innerHTML=pillsHTML+selectBarHTML+catPillsHTML+quickAddHTML+listHTML+completedBtn;
 }
 // 2026-07-17, per Brody (real-phone test): rows only ever showed the due DATE, never the time —
 // flagged as the likely reason the Today list looked "out of order" (it wasn't actually missing,
@@ -2254,8 +2303,18 @@ function mobileTaskRowHTML(t,dateKey){
   const dueStr=t.due?fmtDate(t.due):'';
   const time=dateKey?effectiveTimeFor(t,dateKey):t.scheduledTime;
   const timeStr=time?fmtTimeTo12(time):'';
-  return `<div class="mobile-task-row${t.done?' done':''}" style="border-left-color:${cc}" onclick="openForm('${safeId}')">
-    <button type="button" class="mobile-agenda-check${t.done?' done':''}" onclick="event.stopPropagation();toggle('${safeId}')">${t.done?'<i class="fa fa-check"></i>':''}</button>
+  // 2026-07-22, per Brody: select mode (the 3-dot toggle) reuses the exact same
+  // allTasksSelectMode/allTasksSelections desktop's own "Select" uses — while it's on, the whole
+  // row becomes a selection checkbox instead of opening the task, same "click the whole block"
+  // idiom taskCardHTML already follows for desktop's select mode.
+  const selectMode=allTasksSelectMode;
+  const isSelected=selectMode&&allTasksSelections.has(t.id);
+  const rowClick=selectMode?`toggleAllTasksSelection('${safeId}')`:`openForm('${safeId}')`;
+  const checkHTML=selectMode
+    ?`<button type="button" class="mobile-agenda-check${isSelected?' selected':''}" onclick="event.stopPropagation();toggleAllTasksSelection('${safeId}')">${isSelected?'<i class="fa fa-check"></i>':''}</button>`
+    :`<button type="button" class="mobile-agenda-check${t.done?' done':''}" onclick="event.stopPropagation();toggle('${safeId}')">${t.done?'<i class="fa fa-check"></i>':''}</button>`;
+  return `<div class="mobile-task-row${t.done?' done':''}${isSelected?' selected':''}" style="border-left-color:${cc}" onclick="${rowClick}">
+    ${checkHTML}
     <div class="mobile-agenda-main">
       <div class="mobile-agenda-title${t.done?' done':''}">${grpIconTag(t.group)}${escHtml(t.title)}</div>
       <div class="mobile-task-meta">
@@ -7248,8 +7307,12 @@ function catTabCategoryTasksHTML(group,categoryName){
 // lists across the board," and select mode isn't just for building a Time Block anymore either;
 // it's also the entry point into bulk-editing (due date/group/category/star/complete) or
 // bulk-deleting whatever's selected.
+// 2026-07-22, per Brody: swapped the text "Select"/"Cancel select" button for the same 3-dot
+// (kebab) icon Dolo's own select-mode entry point uses — one visual language for "start picking
+// tasks to bulk-edit/delete" everywhere, desktop and mobile. Same toggle function, same active
+// state, just a plain round icon button instead of a labeled filter pill.
 function selectToggleButtonHTML(){
-  return `<button class="filter-btn ${allTasksSelectMode?'active':''}" style="${allTasksSelectMode?'background:#ffffff;color:#0c0c0c;border-color:#ffffff;font-weight:600':''}" onclick="toggleAllTasksSelectMode()" title="Pick tasks to bulk-edit or bulk-delete"><i class="fa fa-check-square-o" style="margin-right:4px"></i>${allTasksSelectMode?'Cancel select':'Select'}</button>`;
+  return `<button class="select-toggle-btn ${allTasksSelectMode?'active':''}" onclick="toggleAllTasksSelectMode()" title="${allTasksSelectMode?'Cancel select':'Select tasks to bulk-edit or delete'}"><i class="fa fa-ellipsis-h"></i></button>`;
 }
 function selectActionBarHTML(){
   if(!allTasksSelectMode)return '';
@@ -9132,20 +9195,27 @@ function setTagFilter(tag){ tagFilter = (tagFilter===tag) ? null : tag; renderAl
 // (refTaskId) mechanism the category-pull feature already built, so no new rendering logic is
 // needed anywhere else: the calendar chip list, sidebar nesting, and inline-expand already treat
 // any task's subtasks generically, whether the host is a Category block or one of these.
+// 2026-07-22, per Brody: select mode now has an entry point on Dolo too (a 3-dot button next to
+// the Overdue pill, see renderMobileTasksTab), sharing this exact same state/these exact same
+// functions with the desktop "Select" toggle — no separate mobile select-mode logic. That meant
+// switching these three from renderAll() to renderAll3() (which already calls renderMobile() at
+// the end), so toggling/selecting/canceling from either side of the app immediately shows up on
+// the other too. Bonus: this also fixes a pre-existing gap where Planner/Weekly View didn't refresh
+// right after a bulk edit or bulk delete on desktop until something else happened to re-render them.
 function toggleAllTasksSelectMode(){
   allTasksSelectMode=!allTasksSelectMode;
   if(!allTasksSelectMode)allTasksSelections.clear();
-  renderAll();
+  renderAll3();
 }
 function toggleAllTasksSelection(id){
   if(allTasksSelections.has(id))allTasksSelections.delete(id);
   else allTasksSelections.add(id);
-  renderAll();
+  renderAll3();
 }
 function cancelAllTasksSelectMode(){
   allTasksSelectMode=false;
   allTasksSelections.clear();
-  renderAll();
+  renderAll3();
 }
 // Building a new one-off calendar block from a multi-select in All Tasks was removed 2026-07-09
 // per Brody's own critique: a time block is just visual placement on the calendar, so bundling
