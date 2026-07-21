@@ -1190,13 +1190,20 @@
        due date, repeat, time/duration) — no separate/forked modal — this is purely a responsive
        layout change, same pattern the Calendar tab already uses (one data model, two purpose-built
        layouts). Keeping one DOM means recurrence, checklist, and every other bit of form logic
-       can't drift between Blanc and Dolo. --vh is set by the small JS block below and is a more
-       reliable full-height measurement than 100vh/100dvh alone on iOS Safari once the keyboard
-       opens (some iOS versions resize the *visual* viewport, not the layout one, without dvh
-       updating) — falls back to 100dvh/100vh if JS hasn't run yet. */
+       can't drift between Blanc and Dolo.
+       2026-07-22, per Brody (real-phone test, round 2): a JS-driven --vh + visualViewport dance was
+       tried here to actively shrink/reposition the popup around the on-screen keyboard — it made
+       things worse each round (floating mid-screen, a scroll freeze in the separate Pull-in-task
+       picker, now the top getting cut off). Brody's own words: "the prompt should stay in its place
+       ... allow me to still scroll up or down ... I just need to type in there without it moving."
+       Reverted to a plain, static 100dvh (100vh fallback for older iOS) — the popup no longer reacts
+       to the keyboard AT ALL. It just sits still, full-screen, exactly as it opened; the keyboard
+       covers whatever it covers, and modal-body's normal overflow-y:auto scroll (below) is the only
+       way anything moves, same as any ordinary scrollable page. See the JS near the bottom of the
+       file — the whole setRealVh()/visualViewport/focusin-scrollIntoView mechanism was removed. */
     .modal{
       width:100vw;max-width:100vw;border-radius:0;overflow-x:hidden;touch-action:pan-y;
-      height:100vh;height:100dvh;height:calc(var(--vh,1vh) * 100);max-height:none;
+      height:100vh;height:100dvh;max-height:none;
     }
     /* 2026-07-22, per Brody (real-phone test): the header/Done button were rendering right behind
        the Dynamic Island/status bar (clock, wifi, battery) — same exact hardware-inset issue the
@@ -13077,57 +13084,29 @@ document.addEventListener('click',function(e){
   }
 })();
 
-// 2026-07-21: real-viewport-height custom property, used by the mobile edit-task modal's
-// height:calc(var(--vh,1vh) * 100) — 100vh/100dvh alone can lag behind on iOS Safari once the
-// keyboard opens (the layout viewport and the visual viewport disagree, and dvh doesn't always
-// re-fire in time), which is one likely cause of the popup feeling "cut off" with Done unreachable.
-// Recalculated on load, on rotation/resize, AND on visualViewport resize (fires specifically when
-// the keyboard shows/hides) so the modal always matches whatever's actually visible right now.
-function setRealVh(){
-  const vh=(window.visualViewport?window.visualViewport.height:window.innerHeight)*0.01;
-  document.documentElement.style.setProperty('--vh',vh+'px');
-}
-setRealVh();
-window.addEventListener('resize',setRealVh);
-if(window.visualViewport){
-  window.visualViewport.addEventListener('resize',setRealVh);
-  // 2026-07-22: iOS also fires 'scroll' on visualViewport (not just 'resize') while the keyboard
-  // is animating open/closed — resize alone sometimes lagged a beat behind the keyboard actually
-  // being up, which is part of why the popup looked "wonky" mid-transition. Same handler either way.
-  window.visualViewport.addEventListener('scroll',setRealVh);
-}
-// 2026-07-22, per Brody (real-phone test): tapping the checklist input (or any field near the
-// bottom of the popup) could still leave it sitting right at the keyboard's edge even with the
-// top-anchoring/--vh fixes above — this is a direct nudge on top of those: whatever just got focus
-// inside the edit-task popup scrolls itself fully into view a moment after the keyboard finishes
-// animating in, so the field you're about to type into is never half-hidden. 250ms roughly matches
-// iOS's own keyboard-open animation; harmless if it fires while nothing needs scrolling.
-document.addEventListener('focusin',function(e){
-  const modal=document.getElementById('modal');
-  if(!modal||modal.style.display==='none')return;
-  if(!modal.contains(e.target))return;
-  const tag=e.target.tagName;
-  if(tag!=='INPUT'&&tag!=='TEXTAREA'&&tag!=='SELECT')return;
-  setTimeout(()=>{ e.target.scrollIntoView({block:'center',behavior:'smooth'}); },250);
-});
-
-// 2026-07-21: belt-and-suspenders pinch-zoom lock for Dolo — the viewport meta's user-scalable=no
-// handles most browsers, but some iOS Safari versions ignore that under Settings > Accessibility >
-// Zoom unless gesturestart is also prevented in JS. No effect on Blanc (desktop has no pinch gesture).
+// 2026-07-22, per Brody (real-phone test, round 2): REMOVED the whole --vh/visualViewport-driven
+// dynamic resize/reposition mechanism that used to live here, plus the focusin-triggered
+// scrollIntoView "safety net." Each was meant to help the mobile edit-task popup cope with the
+// on-screen keyboard, but every round made it worse — the popup floating mid-screen, a scroll
+// freeze in the separate Pull-in-task picker after scrolling with the keyboard open and then
+// dismissing it, and most recently the top of the popup getting cut off. Brody's own words: "the
+// prompt should stay in its place ... allow me to still scroll up or down ... I just need to type
+// in there without it moving." The popup is back to a plain static height (see the .modal rule in
+// the mobile media query above) and reacts to nothing keyboard-related now — it just sits still and
+// modal-body's normal overflow-y:auto scroll (unchanged, always been there) is however Brody gets
+// to a field the keyboard is covering.
+//
+// The touchend-based "double-tap anywhere to zoom" suppressor that used to sit here was also
+// removed — suspected as the actual cause of the Pull-in-task picker freeze (calling
+// preventDefault() on a touchend right after a scroll gesture is a known way to leave iOS Safari's
+// touch/scroll state stuck). Double-tap zoom is still blocked by the viewport meta's
+// user-scalable=no and the touch-action:manipulation CSS below, which cover the vast majority of
+// cases without needing a global touchend listener at all.
+//
+// Pinch-zoom lock (a distinct two-finger gesture, unrelated to any of the above) is kept — it's
+// what Brody actually asked to lock down originally, and it's never been implicated in any of
+// these bugs.
 document.addEventListener('gesturestart',function(e){e.preventDefault();});
-// Also stop the classic "double-tap anywhere to zoom" on iOS Safari — touch-action:manipulation in
-// the CSS covers most of this, but this catches any element that slips through (e.g. plain divs
-// without a tap handler). Tracks the last tap's time+target; a second tap on the same spot within
-// 300ms is treated as a double-tap and suppressed instead of letting the browser zoom.
-let lastTapTime=0,lastTapTarget=null;
-document.addEventListener('touchend',function(e){
-  const now=Date.now();
-  if(now-lastTapTime<300&&lastTapTarget===e.target){
-    e.preventDefault();
-  }
-  lastTapTime=now;
-  lastTapTarget=e.target;
-},{passive:false});
 </script>
 </body>
 </html>
