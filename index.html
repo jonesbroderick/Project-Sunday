@@ -1250,7 +1250,10 @@
 <div class="app">
   <div class="header-row">
     <div class="header-left">
-      <h1>Project Sunday <button type="button" onclick="handleSignOut()" title="Sign out" style="background:none;border:none;color:var(--text3);font-size:12px;cursor:pointer;vertical-align:middle;margin-left:6px"><i class="fa fa-sign-out"></i></button></h1>
+      <!-- 2026-07-22, per Brody: sign-out removed here too (same call as Dolo's — not needed
+           day-to-day, will live in a real settings screen later). handleSignOut() itself is left
+           alone in case a settings screen wants to call it directly later. -->
+      <h1>Project Sunday</h1>
       <div class="subtitle" id="today-label"></div>
     </div>
     <div class="daily-quote" id="daily-quote" tabindex="0"></div>
@@ -7427,12 +7430,15 @@ function renderAll(){
       : `background:#ff6b6b1a;color:#ff8a8a;border-color:#ff6b6b40`;
     html+=`<button class="filter-btn grp-pill ${odActive?'active':''}" style="${odStyle}" onclick="showOverdueView()" title="Every overdue task, across every group — clears itself out as you catch up"><i class="fa fa-exclamation-circle" style="margin-right:4px"></i>Overdue${overdueCount?` <span class="pill-count-badge">${overdueCount}</span>`:''}</button>`;
   }
-  html+=`<button class="filter-btn grp-manage-btn" onclick="openGroupModal()" title="Manage groups"><i class="fa fa-cog"></i></button>`;
-  html+=`<button class="filter-btn" onclick="openSmartListModal()" title="Saved custom filters"><i class="fa fa-filter"></i> Smart Lists</button>`;
-  // Select entry point (2026-07-01, broadened same day): pick any tasks here, either to bundle
-  // them onto the calendar as a one-time Time Block, or to bulk-edit/bulk-delete them. Kept as a
-  // plain toggle pill, same family as every other filter button, right at the end of the row.
+  // 2026-07-22, per Brody: Smart Lists removed from the row entirely for now ("not focused on
+  // trying to use it or expand on it currently... maybe revisit down the line") — just the entry
+  // point button; openSmartListModal()/activeSmartList and everything else behind it are left
+  // alone in case it comes back later, it's just unreachable from here now.
+  // Select entry point (2026-07-01, broadened same day; moved 2026-07-22 to sit right before the
+  // settings gear instead of after it, per Brody): pick any tasks here, either to bundle them onto
+  // the calendar as a one-time Time Block, or to bulk-edit/bulk-delete them.
   html+=selectToggleButtonHTML();
+  html+=`<button class="filter-btn grp-manage-btn" onclick="openGroupModal()" title="Manage groups"><i class="fa fa-cog"></i></button>`;
   html+='</div>';
   html+=selectActionBarHTML();
   if(allTagsUsed().length){
