@@ -781,6 +781,10 @@
      flex-wrap row instead of squeezing in beside the next chip. */
   .tb-cl-expand{background:none;border:none;color:rgba(255,255,255,.5);cursor:pointer;padding:0 0 0 3px;font-size:8px;flex-shrink:0;display:flex;align-items:center;line-height:1}
   .tb-cl-expand:hover{color:#fff}
+  /* 2026-07-21: same "remove from today's checklist" x every other checklist row now has —
+     never deletes the real task, see removeSidebarChecklistChild. */
+  .tb-cl-remove{background:none;border:none;color:rgba(255,255,255,.4);cursor:pointer;padding:0 0 0 4px;font-size:11px;flex-shrink:0;display:flex;align-items:center;line-height:1}
+  .tb-cl-remove:hover{color:#fff}
   .tb-cl-nested{flex:1 0 100%;display:flex;flex-direction:column;gap:3px;padding:3px 0 3px 22px;margin-top:-2px}
   .tb-cl-nested-row{display:flex;align-items:center;gap:6px;cursor:pointer;border-radius:6px;padding:1px 4px;margin:0 -4px}
   .tb-cl-nested-row:hover{background:rgba(255,255,255,.08)}
@@ -2846,10 +2850,15 @@ function categoryCardHTML(grp,name,scheduleTask,items,doneToday,memberTasks){
   const inlineMemberRowsHTML=memberTasks.map(mt=>{
     const checked=plannerChecked(mt,tk);
     const safeMtId=mt.id.replace(/'/g,"\\'");
+    // 2026-07-21, per Brody: same remove-from-today x every other checklist row has now — never
+    // deletes the real task, just takes it off today (skips today for a recurring one, unschedules
+    // a one-off) — see removeAutoMemberFromToday.
     return `<div class="card-checklist-row" style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeMtId}')">
       <button type="button" class="subtask-check${checked?' done':''}" onclick="event.stopPropagation();toggle('${safeMtId}')">${checked?'<i class="fa fa-check"></i>':''}</button>
       <span class="subtask-text${checked?' done':''}">${escHtml(mt.title)}</span>
       ${rowTimeTagHTML(effectiveTimeFor(mt,tk))}
+      <i class="fa fa-link" style="font-size:10px;opacity:.5;margin-left:4px" title="Filed under this category — always shows here automatically"></i>
+      <button type="button" class="subtask-remove" title="Remove from today's checklist — never deletes the task itself" onclick="event.stopPropagation();removeAutoMemberFromToday('${safeMtId}','${tk}');renderAll3()">&times;</button>
     </div>`;
   }).join('');
   const inlinePoolRowsHTML=items.map(item=>{
@@ -3633,10 +3642,16 @@ function renderAllCategoryDetailPanel(emptyEl,contentEl){
     const checked=plannerChecked(t,todayKey());
     const safeId=t.id.replace(/'/g,"\\'");
     const dupTag=t.categoryDuplicate?`<i class="fa fa-clone" style="font-size:10.5px;color:var(--text3);opacity:.75;margin-left:4px" title="Duplicated from the &quot;${escHtml(t.categoryDuplicate.name)}&quot; category"></i>`:'';
+    // 2026-07-21, per Brody: same "remove from today's checklist, never delete the real task" x
+    // every other checklist row now has — see removeAutoMemberFromToday. The grey link icon (vs the
+    // blue one a manual pull's row gets) is the one deliberate visual difference kept, per Brody:
+    // "we can keep the grey vs the blue to differentiate a recurring/auto task."
     return `<div class="checklist-row" title="Task filed under this category">
       <button type="button" class="subtask-check${checked?' done':''}" onclick="toggle('${safeId}');renderAllDetailPanel();renderAll()">${checked?'<i class="fa fa-check"></i>':''}</button>
       <span class="subtask-text${checked?' done':''}" style="cursor:pointer" onclick="selectAllTaskDetail('${safeId}')">${escHtml(t.title)}</span>
       ${dupTag}
+      <i class="fa fa-link" style="font-size:10px;color:var(--text3);opacity:.7;margin-left:4px" title="Filed under this category — always shows here automatically"></i>
+      <button type="button" class="subtask-remove" title="Remove from today's checklist — never deletes the task itself" onclick="removeAutoMemberFromToday('${safeId}',todayKey());renderAllDetailPanel();renderAll()">&times;</button>
     </div>`;
   }).join('');
   const checklistHTML=ownRowsHTML+memberRowsHTML+poolRowsHTML;
@@ -4694,10 +4709,15 @@ function taskCardHTML(t,showDate,compact,dateKey,tintByGroup,focusDraggable){
         const checked=plannerChecked(mt,dk);
         const safeMtId=mt.id.replace(/'/g,"\\'");
         const mtTime=effectiveTimeFor(mt,dk);
+        // 2026-07-21, per Brody: same remove-from-this-day x every other checklist row has —
+        // scoped to dk (this specific Weekly View day), not always today, since this card can
+        // render any day of the week, not just today.
         return `<div class="card-checklist-row" style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeMtId}')">
           <button type="button" class="subtask-check${checked?' done':''}" onclick="event.stopPropagation();toggle('${safeMtId}')">${checked?'<i class="fa fa-check"></i>':''}</button>
           <span class="subtask-text${checked?' done':''}">${escHtml(mt.title)}</span>
           ${mtTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(mtTime)}</span>`:''}
+          <i class="fa fa-link" style="font-size:10px;opacity:.5;margin-left:4px" title="Filed under this category — always shows here automatically"></i>
+          <button type="button" class="subtask-remove" title="Remove from this day's checklist — never deletes the task itself" onclick="event.stopPropagation();removeAutoMemberFromToday('${safeMtId}','${dk}');renderAll3()">&times;</button>
         </div>`;
       }).join(''):'';
       const poolRowsForDk=(isCategory)?poolDayItemsForDate(t.categoryRef.group,t.categoryRef.name,dk):[];
@@ -8127,6 +8147,7 @@ function virtualCategoryTrayCardHTML(group,name,members,poolItems,dateKey){
     return `<div class="sidebar-task sidebar-subtask${checked?' done-task':''}" style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeId}')">
       <button class="check-btn ${checked?'done':''}" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();toggle('${safeId}')">${checked?'<i class="fa fa-check"></i>':''}</button>
       <div class="sidebar-task-body"><div class="sidebar-task-title${checked?' done':''}">${escHtml(mt.title)}${timeTagHTML}</div></div>
+      <button class="sidebar-delete" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();removeAutoMemberFromToday('${safeId}','${dateKey}');renderPlanner();renderAll3()" title="Remove from today's checklist — never deletes the task itself">×</button>
     </div>`;
   }).join('');
   const poolRows=poolItems.map(item=>{
@@ -8454,7 +8475,15 @@ function renderPlanner(){
       // (expandBtn) already stops its own click from bubbling up here, so tapping it still just
       // expands/collapses without also toggling the item done.
       const rowTimeTag=r.time?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(r.time)}</span>`:'';
-      return `<div class="tb-cl-chip" onmousedown="event.stopPropagation()" onclick="${checkOnclick}"><button type="button" class="tb-cl-check${r.done?' done':''}" onmousedown="event.stopPropagation()" onclick="${checkOnclick}">${r.done?'<i class="fa fa-check"></i>':''}</button><span class="tb-cl-text${r.done?' done':''}">${escHtml(r.title)}</span>${rowTimeTag}${r.refTaskId?'<i class="fa fa-link tb-cl-link" title="Live-linked task"></i>':''}${r.pool?'<i class="fa fa-tint tb-cl-link" title="Pool item"></i>':''}${expandBtn}</div>${nested}`;
+      // 2026-07-21, per Brody: every checklist row gets the same "remove from today, never delete
+      // the real task" x — an auto-member (Legs, filed under Gym) goes through
+      // removeAutoMemberFromToday (skip today only for a recurring one, unschedule for a one-off);
+      // a manually pulled-in link just gets its row stripped off this block's subtasks. Reuses
+      // removeSidebarChecklistChild (identical contract, already built for the sidebar's own nested
+      // rows) instead of a third copy of the same branch. Pool rows are untouched — separate legacy
+      // system with its own send-back control, out of scope here.
+      const removeBtn=r.pool?'':`<button type="button" class="tb-cl-remove" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();removeSidebarChecklistChild('${t.id}','${safeRowId}','${String(r.refTaskId||'').replace(/'/g,"\\'")}',${r.auto?'true':'false'},'${plannerDate}')" title="Remove from today's checklist — never deletes the task itself">×</button>`;
+      return `<div class="tb-cl-chip" onmousedown="event.stopPropagation()" onclick="${checkOnclick}"><button type="button" class="tb-cl-check${r.done?' done':''}" onmousedown="event.stopPropagation()" onclick="${checkOnclick}">${r.done?'<i class="fa fa-check"></i>':''}</button><span class="tb-cl-text${r.done?' done':''}">${escHtml(r.title)}</span>${rowTimeTag}${r.refTaskId?`<i class="fa fa-link tb-cl-link"${r.auto?' style="opacity:.55"':''} title="${r.auto?'Filed under this category — always shows here automatically':'Live-linked task'}"></i>`:''}${r.pool?'<i class="fa fa-tint tb-cl-link" title="Pool item"></i>':''}${expandBtn}${removeBtn}</div>${nested}`;
     }).join('')}${hiddenRowCount?`<button type="button" class="tb-cl-more" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();openForm('${t.id.replace(/'/g,"\\'")}')" title="${hiddenRowCount} more item${hiddenRowCount===1?'':'s'} — click to see all"><i class="fa fa-ellipsis-h"></i> +${hiddenRowCount} more</button>`:''}</div>`:'';
     // A block too short for its own second row still gets a checklist preview — just squeezed into
     // the title row instead, to the right, per Brody's own suggestion. This reuses the exact same
@@ -8660,25 +8689,32 @@ function renderPlanner(){
                 <span class="sidebar-nested-tag" style="color:${cc}" title="Checklist item on &quot;${escHtml(t.title)}&quot;"><i class="fa fa-level-up fa-rotate-90"></i>${escHtml(t.title)}</span>
               </div>
             </div>
+            <button class="sidebar-delete" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();removeSidebarChecklistChild('${safeHostId}','${safeRowId}',null,false,'${plannerDate}')" title="Remove from today's checklist">×</button>
           </div>`;
           return;
         }
         const rtChecked=plannerChecked(rt,plannerDate);
         const safeRtId=rt.id.replace(/'/g,"\\'");
         const childCheckOnclick=auto?`toggle('${safeRtId}')`:`toggleSubtaskDone('${safeHostId}','${safeRowId}','${plannerDate}')`;
+        // 2026-07-21, per Brody: grey vs blue link icon is the one visual cue kept to tell "auto
+        // member, filed under this category" apart from "manually pulled-in link" — everything else
+        // about the row (check, remove-from-today, star, lock) now works identically either way.
+        const childLinkIcon=auto
+          ?`<i class="fa fa-link" style="font-size:10px;color:var(--text3);margin-left:2px" title="Filed under this category — always shows here automatically"></i>`
+          :`<i class="fa fa-link subtask-linked-icon" title="Live-linked task"></i>`;
         html+=`<div class="sidebar-task sidebar-subtask ${rtChecked?'done-task':''}" onmousedown="initTrayDrag(event,'${rt.id}',this,'sidebar-ghost')">
           <button class="check-btn ${rtChecked?'done':''}"
             onmousedown="event.stopPropagation()"
             onclick="event.stopPropagation();${childCheckOnclick}">${rtChecked?'<i class="fa fa-check"></i>':''}</button>
           <div class="sidebar-task-body">
-            <div class="sidebar-task-title ${rtChecked?'done':''}">${escHtml(rt.title)}${(()=>{const rtTime=effectiveTimeFor(rt,plannerDate);return rtTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(rtTime)}</span>`:'';})()}</div>
+            <div class="sidebar-task-title ${rtChecked?'done':''}">${escHtml(rt.title)}${childLinkIcon}${(()=>{const rtTime=effectiveTimeFor(rt,plannerDate);return rtTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(rtTime)}</span>`:'';})()}</div>
             <div class="sidebar-task-meta">
               <span class="sidebar-nested-tag" style="color:${cc}" title="Nested under &quot;${escHtml(t.title)}&quot; — drag onto a different block on the calendar to move it there"><i class="fa fa-level-up fa-rotate-90"></i>${escHtml(t.title)}</span>
             </div>
           </div>
           ${starBtnHTML(rt,'sidebar-star-btn','13px')}
           ${lockBtnHTML(rt,'sidebar-lock-btn','13px')}
-          <button class="sidebar-delete" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();deleteTask('${rt.id}')">×</button>
+          <button class="sidebar-delete" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();removeSidebarChecklistChild('${safeHostId}','${safeRowId}','${safeRtId}',${auto?'true':'false'},'${plannerDate}')" title="Remove from today's checklist — never deletes the task itself">×</button>
         </div>`;
       });
     });
@@ -9567,6 +9603,57 @@ function renderFormSkippedDates(){
   el.innerHTML=`<label class="field-label">Skipped on</label><div class="tag-input-wrap" style="min-height:0;padding:4px 6px;gap:4px">${skipped.map(d=>`<span class="tag-chip" style="background:rgba(255,160,0,.18);color:var(--text2)">${d}<button type="button" onclick="unskipTask('${safeId}','${d}')" style="background:none;border:none;color:var(--text3);cursor:pointer;padding:0 0 0 3px;font-size:11px;line-height:1" title="Remove skip">&times;</button></span>`).join('')}</div>`;
 }
 
+// 2026-07-21, per Brody: a category's auto-member row (a real task filed directly under the
+// category, showing up in its checklist because it's due or recurring today — Legs under Gym, say
+// — NOT a manually pulled-in link) never had any way to take it off just TODAY's checklist. Every
+// OTHER kind of checklist row already supports that (a manual pull unlinks via its own × without
+// touching the real task; skipTask/unskipTask already does exactly this for a recurring task
+// dropped as its own standalone calendar block). Brody's explicit ask: "regardless of whether tasks
+// are locked, recurring, etc." every checklist row should share this same basic function — remove
+// from today, zero effect on the task itself or (for a recurring one) any other day it's due.
+// - Recurring auto-member: reuses the exact same skippedDates mechanism the calendar's own "Skip
+//   this day" button already uses — adds today to t.skippedDates, so recurrenceMatchesDate simply
+//   stops matching today; every other occurrence is untouched.
+// - One-off auto-member (due exactly on dateKey, not recurring): the closest equivalent is clearing
+//   its due date — same "unschedule, don't delete" contract a manual pull's × already has. The task
+//   keeps existing under its category with no due date, ready for Brody to reschedule it whenever.
+// Deliberately does its own save() but NOT its own render — this needs to be callable from several
+// very different UI contexts (Edit Task modal, All Tasks quick-view, inline Today card, Weekly View,
+// Day Planner calendar/sidebar), each of which already knows what to re-render after any other
+// mutation in that same spot; duplicating one specific render call in here would inevitably miss one.
+function removeAutoMemberFromToday(id,dateKey){
+  const t=tasks.find(x=>x.id===id);
+  if(!t)return;
+  if(isRecurringTask(t)){
+    if(!t.skippedDates)t.skippedDates=[];
+    if(!t.skippedDates.includes(dateKey))t.skippedDates.push(dateKey);
+  } else if(t.due===dateKey){
+    t.due=null;
+  }
+  save();
+}
+// 2026-07-21, per Brody: the sidebar's nested checklist rows (Day Planner) were wired to the same
+// sidebar-delete button its top-level host task row uses — which calls deleteTask(), a REAL,
+// permanent delete of the underlying task (with its own confirm dialog). That's correct for the
+// host row itself, but wrong for a nested child: whether that child is a manually pulled-in link or
+// an auto-member, removing it from the sidebar should only take it off THIS checklist/day, same as
+// everywhere else in the app — never delete the real task. This is the shared "x" handler for a
+// nested sidebar row: auto members go through removeAutoMemberFromToday (skip/unschedule, see
+// above); a real pulled-in link (has its own subtasks row on the host with a refTaskId) just gets
+// that one row stripped from the host's subtasks array, exactly like removeFormSubtask does
+// elsewhere — the real task is never touched either way.
+function removeSidebarChecklistChild(hostId,rowId,taskId,auto,dateKey){
+  if(auto){
+    removeAutoMemberFromToday(taskId,dateKey);
+  } else {
+    const host=tasks.find(x=>x.id===hostId);
+    if(host&&host.subtasks)host.subtasks=host.subtasks.filter(s=>s.id!==rowId);
+    save();
+  }
+  renderPlanner();
+  renderAll3();
+}
+
 function toggleNote(id){
   expandedNotes[id]=!expandedNotes[id];
   renderAll3();
@@ -10398,6 +10485,7 @@ function renderFormSubtasks(){
         <button type="button" class="subtask-check ${done?'done':''}" onclick="event.stopPropagation();toggleFormAutoMember('${safeId}')">${done?'<i class="fa fa-check"></i>':''}</button>
         <span class="subtask-text ${done?'done':''}">${escHtml(mt.title)}</span>
         ${mtTimeTag}
+        <button type="button" class="subtask-remove" title="Remove from today's checklist — never deletes the task itself" onclick="event.stopPropagation();removeFormAutoMember('${safeId}')">&times;</button>
       </div>`;
     }).join('')
     :'';
@@ -10609,6 +10697,16 @@ function toggleFormAutoMember(taskId){
   toggle(taskId);
   renderFormSubtasks();
   setTimeout(renderFormSubtasks,1300);
+}
+// 2026-07-21, per Brody: an auto-member row (Legs, filed under Gym) never had a way to come off just
+// today's checklist without completing it or leaving it sitting there — "if I end up hitting Chest
+// instead of Legs on Legs' scheduled day, I want to remove Legs from today's checklist" with zero
+// effect on its recurring schedule otherwise. Same contract as removing a manual pull: the real task
+// is never touched, only today's occurrence disappears (see removeAutoMemberFromToday).
+function removeFormAutoMember(taskId){
+  removeAutoMemberFromToday(taskId,todayKey());
+  renderFormSubtasks();
+  renderAll3();
 }
 // 2026-07-13, per Brody: drag-to-reorder for a category's auto-member rows (see
 // autoMemberRowsHTML) — same mechanics as checklistDragStart/Over/Leave/Drop/End just below, but
