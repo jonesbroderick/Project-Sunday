@@ -9689,8 +9689,17 @@ function togglePullPickerGrp(grp){
 // has one (planning ahead onto a future day's checklist), otherwise today. Same fallback
 // togglePullTaskPick already used inline; hoisted out so the "selected" check below can share it.
 function pullPickerForDate(){
-  const dueEl=document.getElementById('f-due');
-  return (dueEl&&dueEl.value)?dueEl.value:todayKey();
+  // 2026-07-21 fix, per Brody: this used to read the f-due field's raw value as "the day this pull
+  // is for." That seemed right for a plain one-off task with its own future/past due date, but for
+  // any recurring task or category block (the actual, common case — Gym, Calls, etc.) the f-due
+  // field is populated straight from t.due (see openForm), which is the recurring ANCHOR/pattern
+  // date, not "today" and not "whichever day is currently being viewed" — openForm never actually
+  // tracks the latter for an existing task. So a freshly-pulled row got stamped with that stale
+  // anchor date, which almost never equals todayKey(), while the checklist itself
+  // (renderFormSubtasks) always filters against real todayKey() — guaranteed mismatch, so the pull
+  // silently never showed. Checklists are always "today's checklist" per Brody's own rule, so this
+  // now always scopes a pull to today, full stop — no more silent mismatch.
+  return todayKey();
 }
 function pullTaskRowHTML(t){
   // 2026-07-16 fix: an auto-member of the category block being edited is already showing in this
