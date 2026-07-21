@@ -224,6 +224,13 @@
      their own classes/handlers. */
   .task-card.ungrouped-draggable{cursor:grab}
   .task-card.ungrouped-draggable.dragging{opacity:.4}
+  /* 2026-07-21, per Brody: Today's "focus order" feature — an untimed task on the Today list can be
+     dragged to bubble it up without needing a due time or a star. Same drag-row idiom as
+     .checklist-row.dragging/.drag-over, just scoped to .task-card so the whole card (not a tiny
+     handle) is the drag surface, matching his click-target preference. */
+  .task-card.focus-draggable{cursor:grab}
+  .task-card.focus-draggable.dragging{opacity:.4}
+  .task-card.focus-draggable.drag-over{box-shadow:0 0 0 2px var(--blue);border-color:var(--blue)!important}
   .cat-drop-target{transition:background .1s,box-shadow .1s}
   .cat-drop-target.cat-drop-hover{background:var(--blue-bg)!important;box-shadow:inset 0 0 0 2px var(--blue)}
   .filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:1rem}
@@ -3255,7 +3262,23 @@ function sweepStalePulledLinks(){
   });
   if(changed){ save(); if(typeof renderAll3==='function') renderAll3(); }
 }
-sweepStalePulledLinks();
+// 2026-07-21 fix, per Brody's console screenshot: this used to run immediately, synchronously,
+// right here at the top level — but CATEGORY_DEFS (declared much further down the script, via
+// `let CATEGORY_DEFS = loadCategoryDefs()`) doesn't exist yet at this point in a top-to-bottom
+// script run. On a day this sweep actually finds something stale to prune (changed=true — which
+// keeps happening more often now that checklist expiry is more thorough, see the 2026-07-21
+// checklist date-scoping fixes), it called renderAll3()→updateStats()→...→allCategoriesUsed(),
+// which reads CATEGORY_DEFS — throwing "Cannot access 'CATEGORY_DEFS' before initialization" and
+// aborting the ENTIRE rest of this script right here, mid-file — meaning every function/variable
+// declared below this line (the vast majority of the app) never gets defined at all for that load.
+// That's the double-refresh freeze: the page has to reload once with nothing to sweep (or after the
+// bad state got cleared) for the script to make it all the way through successfully. Deferring this
+// one call with setTimeout(...,0) pushes it to run AFTER the whole script has finished executing
+// top-to-bottom (including CATEGORY_DEFS's own declaration), so it can never crash mid-boot again —
+// same reasoning is why the OTHER two call sites for this function (the day-turnover check in
+// updateNowLine, and the on-load catch-up call much later in the file) were always safe: they run
+// long after CATEGORY_DEFS already exists.
+setTimeout(sweepStalePulledLinks, 0);
 let editId = null;
 // True only when the task screen is open on a task that already existed before this screen opened
 // (never for a brand-new task being created this session). Used to decide whether changing the
@@ -3557,7 +3580,18 @@ function renderAllCategoryDetailPanel(emptyEl,contentEl){
   const scheduleActive=!!(scheduleTask&&isRecurringTask(scheduleTask));
   const safeGrp=grp.replace(/'/g,"\\'"), safeName=name.replace(/'/g,"\\'");
   const ownSubtasks=scheduleTask?(scheduleTask.subtasks||[]):[];
-  const ownRowsHTML=ownSubtasks.map((s,i)=>{
+  // 2026-07-21 fix, per Brody: this panel is labeled "Today's checklist" but used to map over EVERY
+  // row in ownSubtasks with no date filter at all — unlike the Day Planner calendar block
+  // (renderPlanner's own `subtasks` a few hundred lines up), which already runs the identical array
+  // through subtaskVisibleOnDate before rendering. That mismatch is exactly why a stale/expired pull
+  // (or a linked recurring task not actually due today) could show here — checked or not — while the
+  // calendar correctly left it out entirely. Filtering here the same way brings this panel back in
+  // sync with the calendar. `i` is still looked up against the REAL ownSubtasks array (not the
+  // filtered position) so allCategoryDetailChecklistDrop's splice-by-index reorder below keeps
+  // working correctly even when some rows are hidden.
+  const visibleOwnSubtasks=ownSubtasks.filter(s=>subtaskVisibleOnDate(s,todayKey()));
+  const ownRowsHTML=visibleOwnSubtasks.map(s=>{
+    const i=ownSubtasks.indexOf(s);
     const p=subRowParts(s);
     p.done=subtaskDoneForDate(s,todayKey(),scheduleTask);
     return `<div class="checklist-row" draggable="true"
@@ -4176,8 +4210,15 @@ function dueSortVal(t){
   if(!ed)return '9999-12-31T99:99';
   return ed+'T'+(t.scheduledTime||'00:00');
 }
+// 2026-07-21, per Brody: added a `focusOrder` tiebreaker at the very end — it only ever kicks in
+// when two tasks already tie on done/starred/due-time (the common case being two untimed tasks due
+// the same day, since dueSortVal gives every untimed task the same "00:00" slot). Tasks that never
+// had focusOrder set compare as 0===0 and just keep whatever order they already had (stable sort),
+// so this is purely additive — nothing that already sorted differently changes. See
+// focusReorderList/focusDrop below for how focusOrder actually gets assigned (drag-to-reorder on
+// the Today tab).
 function byDueTime(a,b){
-  return (a.done-b.done)||((b.starred?1:0)-(a.starred?1:0))||dueSortVal(a).localeCompare(dueSortVal(b));
+  return (a.done-b.done)||((b.starred?1:0)-(a.starred?1:0))||dueSortVal(a).localeCompare(dueSortVal(b))||((a.focusOrder||0)-(b.focusOrder||0));
 }
 // Builds one collapsible-style category block for the All Tasks view.
 // If list is empty and emptyText is given, the category still shows (as a compact header-only bar,
@@ -4266,6 +4307,71 @@ function dropTaskOntoCategory(event,grp,name){
   save();
   renderAll3();
 }
+
+// ── Today tab "focus order" drag-to-reorder (2026-07-21, per Brody) ──
+// Same plain HTML5 drag idiom as checklistDragStart/Over/Leave/Drop/End (a single in-flight id
+// rather than relying purely on dataTransfer, since dragover can't always read its payload
+// mid-drag) — just working over a recomputed slice of the flat `tasks` array instead of a literal
+// sub-array field, since Today's per-group untimed list isn't its own stored array anywhere.
+// Reorder only ever runs among tasks that would render in the SAME eligible list (see
+// taskCardHTML's focusEligible gate above), so dropping across groups or onto a timed/done/category
+// row is simply a no-op — grp is passed straight through from whichever row the drag started on.
+let focusDragId=null;
+// Rebuilds the exact eligible subset for one group's (or, for '' , the ungrouped) Today list, in
+// current display order — same filter+sort renderAll's allTasksTodayActive branch already uses for
+// dueOrRecurring/ungroupedToday, so the index math here always matches what's on screen.
+function focusReorderList(grpStr){
+  const tk=todayKey();
+  return dayTaskList(tk)
+    .filter(t=>!t.isCategoryBlock&&!t.category&&(t.group||'')===(grpStr||'')&&!plannerChecked(t,tk)&&!effectiveTimeFor(t,tk))
+    .sort(byDueTime);
+}
+function focusDragStart(e,id){
+  focusDragId=id;
+  if(e.dataTransfer){
+    e.dataTransfer.effectAllowed='move';
+    try{e.dataTransfer.setData('text/plain',id);}catch(err){}
+  }
+  e.currentTarget.classList.add('dragging');
+}
+function focusDragOver(e,id){
+  e.preventDefault(); // required so a drop is even allowed to land here
+  if(focusDragId===null||focusDragId===id)return;
+  e.dataTransfer.dropEffect='move';
+  e.currentTarget.classList.add('drag-over');
+}
+function focusDragLeave(e){
+  e.currentTarget.classList.remove('drag-over');
+}
+function focusDrop(e,targetId,grpStr){
+  e.preventDefault();
+  e.currentTarget.classList.remove('drag-over');
+  const fromId=focusDragId;
+  focusDragId=null;
+  if(!fromId||fromId===targetId)return;
+  const list=focusReorderList(grpStr);
+  const fromIdx=list.findIndex(t=>t.id===fromId);
+  const toIdx=list.findIndex(t=>t.id===targetId);
+  if(fromIdx===-1||toIdx===-1)return; // dragged across groups, or target no longer eligible — no-op
+  const [moved]=list.splice(fromIdx,1);
+  list.splice(toIdx,0,moved);
+  // Reassigning every item in the subset (not just the two that moved) keeps focusOrder values
+  // small and monotonic, so the next drag's tie-break math never has to deal with big gaps or
+  // leftover stale numbers from tasks that have since left this list (checked off, re-dated, etc).
+  list.forEach((t,i)=>{t.focusOrder=i*10;});
+  save();
+  renderAll3();
+}
+function focusDragEnd(e){
+  focusDragId=null;
+  // Defensive cleanup in case drop landed outside any eligible row — a real drop already re-renders
+  // fresh via renderAll3(), same reasoning as checklistDragEnd's own cleanup pass.
+  document.querySelectorAll('.task-card.focus-draggable.dragging,.task-card.focus-draggable.drag-over').forEach(el=>{
+    el.classList.remove('dragging');
+    el.classList.remove('drag-over');
+  });
+}
+
 function handleTodayQuickAddKey(event){
   if(event.key!=='Enter')return;
   event.preventDefault();
@@ -4515,7 +4621,7 @@ function taskChecklistTotals(t,dateKey){
 // convention as the My Day sidebar/category cards above — opt-in via this 5th param so every OTHER
 // caller (Overdue, Planned, Priority, per-group tabs, etc.) keeps its existing bucket-colored or
 // plain card background untouched.
-function taskCardHTML(t,showDate,compact,dateKey,tintByGroup){
+function taskCardHTML(t,showDate,compact,dateKey,tintByGroup,focusDraggable){
   const cc=GRP_COLORS[t.group]||'#888';
   const subtasks=(t.subtasks||[]).filter(s=>subtaskVisibleOnDate(s,dateKey||todayKey()));
   // 2026-07-15 fix: this used to always read taskChecklistTotals(t) with NO dateKey, so a category's
@@ -4708,14 +4814,30 @@ function taskCardHTML(t,showDate,compact,dateKey,tintByGroup){
   // (Recurring tasks keep their teal .is-recurring look regardless — that rule's !important wins
   // over this inline tint, same as everywhere else in the app; nothing to special-case here.)
   const tintStyle=tintByGroup?` style="background:${cc}1f;border-left:3px solid ${cc}"`:'';
+  // 2026-07-21, per Brody: Today tab "focus order" — a way to bump a task up the list without
+  // setting a due time or starring it (those already exist; this is the third, purely-manual lever).
+  // Only offered when the caller opts in (focusDraggable, passed by the allTasksTodayActive branch
+  // of renderAll for both a group's own list and the ungrouped-today list) AND the task is a real
+  // undone, untimed, non-category row for today — a timed task's position is driven by its time and
+  // isn't reorderable here, matching the spec that due-time stays the primary sort.
+  const focusTkCheck=dateKey||todayKey();
+  const focusEligible=!!focusDraggable&&!compact&&!t.isCategoryBlock&&!plannerChecked(t,focusTkCheck)&&!effectiveTimeFor(t,focusTkCheck)&&!selectMode;
+  const focusDragCls=focusEligible?' focus-draggable':'';
+  const safeFocusGrp=String(t.group||'').replace(/'/g,"\\'");
+  const focusDragAttrs=focusEligible?` draggable="true" ondragstart="focusDragStart(event,'${t.id}')" ondragover="focusDragOver(event,'${t.id}')" ondragleave="focusDragLeave(event)" ondrop="focusDrop(event,'${t.id}','${safeFocusGrp}')" ondragend="focusDragEnd(event)"`:'';
+  const focusGripHTML=focusEligible?`<i class="fa fa-bars checklist-grip" title="Drag to move up or down today's list" style="margin-right:7px;align-self:center"></i>`:'';
   // 2026-07-14, per Brody: a group-less/category-less task (Today quick-add, or anything sitting
   // in the "Tasks" catch-all pill) can be dragged straight onto a Category header (see
   // dropTaskOntoCategory) to file it — only wired up for these truly homeless tasks, so dragging
-  // never gets offered on a task that's already properly categorized.
-  const ungroupedDragCls=(!t.group&&!selectMode)?' ungrouped-draggable':'';
-  const ungroupedDragAttrs=(!t.group&&!selectMode)?` draggable="true" ondragstart="ungroupedDragStart(event,'${t.id}')" ondragend="ungroupedDragEnd(event)"`:'';
-  return `<div class="task-card${recurCls}${selectMode?' select-mode':''}${isSelected?' selected':''}${allSelectedCls}${ungroupedDragCls}" id="card-${t.id}"${tintStyle} ${selectRowClick}${ungroupedDragAttrs}>
+  // never gets offered on a task that's already properly categorized. When focusEligible also
+  // applies (an ungrouped task sitting in Today), the focus-reorder drag wins instead — dropping a
+  // Today card onto a category still works fine from the "Tasks" pill's own flat list, which never
+  // sets focusDraggable.
+  const ungroupedDragCls=(!t.group&&!selectMode&&!focusEligible)?' ungrouped-draggable':'';
+  const ungroupedDragAttrs=(!t.group&&!selectMode&&!focusEligible)?` draggable="true" ondragstart="ungroupedDragStart(event,'${t.id}')" ondragend="ungroupedDragEnd(event)"`:'';
+  return `<div class="task-card${recurCls}${selectMode?' select-mode':''}${isSelected?' selected':''}${allSelectedCls}${ungroupedDragCls}${focusDragCls}" id="card-${t.id}"${tintStyle} ${selectRowClick}${ungroupedDragAttrs}${focusDragAttrs}>
     <div class="task-main" ${openRow}>
+      ${focusGripHTML}
       ${selectCheckHTML}
       <div class="task-body" ${openRow}>
         <div class="task-title ${t.done?'done':''}" ${openRow}>${isOverdue(t)?'<i class="fa fa-exclamation-circle task-overdue-icon" title="Overdue"></i>':''}${escHtml(t.title)}</div>
@@ -7132,7 +7254,7 @@ function renderAll(){
       const doneIndToday=dueOrRecurring.filter(t=>plannerChecked(t,tk));
       totalDoneToday+=doneIndToday.length;
       const visibleInd=showCompleted?dueOrRecurring:openInd;
-      listHTML+=visibleInd.map(t=>taskCardHTML(t,true,false,null,true)).join('');
+      listHTML+=visibleInd.map(t=>taskCardHTML(t,true,false,null,true,true)).join('');
     });
     // Group-less tasks (Today quick-adds not yet dragged onto a Category) fall in at the end,
     // same flat treatment, tinted gray by taskCardHTML's own fallback since t.group is null.
@@ -7141,7 +7263,7 @@ function renderAll(){
     const ungroupedDoneToday=ungroupedToday.filter(t=>plannerChecked(t,tk));
     totalDoneToday+=ungroupedDoneToday.length;
     const ungroupedVisible=showCompleted?ungroupedToday:ungroupedOpen;
-    listHTML+=ungroupedVisible.map(t=>taskCardHTML(t,true,false,null,true)).join('');
+    listHTML+=ungroupedVisible.map(t=>taskCardHTML(t,true,false,null,true,true)).join('');
     html+=completedTopToggleHTML(totalDoneToday,0);
     html+=listHTML?`<div>${listHTML}</div>`:`<div class="empty">Nothing due today. 🎉</div>`;
     // This whole section is already date-scoped to today, so there's no "older history" to
@@ -9146,7 +9268,15 @@ function resetLockedTasksForNewDay(){
   const tk=todayKey();
   let changed=false;
   tasks.forEach(t=>{
-    if(t.locked && !isRecurringTask(t) && t.done && t.completedAt && dayKey(new Date(t.completedAt))!==tk){
+    // 2026-07-21 fix, per Brody: this used to require t.completedAt to be truthy to even check
+    // whether it was stale — a locked, non-recurring task that's somehow marked done with no
+    // completedAt (shouldn't normally happen since toggle() always sets both together, but a task
+    // pulled/edited outside that path, or older data from before this convention, could end up in
+    // that state) never got reset at all, staying "done" forever with nothing to ever clear it back.
+    // Missing completedAt on a done task is itself a sign of stale data, so it's treated as stale
+    // here too, not left alone.
+    const staleDone=t.done&&(!t.completedAt||dayKey(new Date(t.completedAt))!==tk);
+    if(t.locked && !isRecurringTask(t) && staleDone){
       t.due=null;
       t.scheduledTime=null;
       t.done=false;
@@ -9308,8 +9438,16 @@ function createOneOffChecklistTask(group,category,title){
   return newTask.id;
 }
 // subtaskDoneForDate: whether a checklist row counts as done on a SPECIFIC calendar day.
-// - A live-linked row (refTaskId) always defers to the real task's own per-day record
-//   (plannerChecked) — unchanged from before.
+// - A live-linked row (refTaskId) reads the real task's own per-day completedDates log directly
+//   (isCheckedOn) — 2026-07-21 fix, per Brody: this used to go through plannerChecked, which only
+//   consults completedDates for a RECURRING linked task and falls back to the raw rt.done flag for
+//   everything else (including a locked, non-recurring pull, e.g. a Gym exercise). That raw flag is
+//   only ever reset by the fragile "~1.2s after checking" in-session timeout or the day-turnover
+//   sweep (resetLockedTasksForNewDay), both of which can miss a task (tab closed right after
+//   checking, or completedAt somehow unset) — leaving it stuck "done" indefinitely, showing checked
+//   here even on a day Brody never touched it. completedDates is written unconditionally by every
+//   toggle() call regardless of task type, so reading it directly here is accurate for every kind of
+//   linked task, with nothing fragile in between.
 // - A plain row belonging to a recurring Category's own checklist (parentTask.isCategoryBlock &&
 //   isRecurringTask) gets its OWN per-day memory (s.doneDates) — added 2026-07-09 so a category's
 //   checklist can tell "checked yesterday" apart from "checked today" (see the Overdue rollover
@@ -9320,7 +9458,7 @@ function createOneOffChecklistTask(group,category,title){
 function subtaskDoneForDate(s,dateKey,parentTask){
   if(s.refTaskId){
     const rt=tasks.find(x=>x.id===s.refTaskId);
-    return rt?plannerChecked(rt,dateKey):false;
+    return rt?isCheckedOn(rt,dateKey):false;
   }
   if(parentTask&&parentTask.isCategoryBlock&&isRecurringTask(parentTask)){
     return !!(s.doneDates&&s.doneDates.includes(dateKey));
@@ -10176,7 +10314,6 @@ function renderFormSubtasks(){
   // through the same day-scoped lookup toggleFormSubtask now writes to (doneDates), so the
   // checkbox shown here always matches what checking it actually does.
   const existingTask=editId?tasks.find(x=>x.id===editId):null;
-  const isDateScopedCategory=!!(existingTask&&existingTask.isCategoryBlock&&isRecurringTask(existingTask));
   // 2026-07-13 fix, per Brody: a recurring Category's member tasks (filed under it via its own
   // Group/Category, not manually pulled in as a subtask row) already show up nested under its
   // calendar block (categoryAutoMemberTasksForBlock, see renderPlanner's autoMemberRows) and in
@@ -10216,9 +10353,23 @@ function renderFormSubtasks(){
       </div>`;
     }).join('')
     :'';
-  wrap.innerHTML=formSubtasks.map((s,i)=>{
+  // 2026-07-21, per Brody: the Edit Task screen's checklist used to always show the FULL raw
+  // formSubtasks array — every pull ever linked in, regardless of whether it's actually relevant
+  // today. Per Brody: "checklists anywhere across the board should only be ones I manually pulled
+  // in for the day, are auto pulled in by a recurring due date, or I manually typed in" — the same
+  // subtaskVisibleOnDate rule the calendar and the All Tasks quick-view already use (see
+  // renderAllCategoryDetailPanel's 2026-07-21 fix). `i` is still looked up against the REAL,
+  // unfiltered formSubtasks array (not the filtered display position) so every existing index-based
+  // handler below (checklistDragStart/Drop, removeFormSubtask, toggleFormSubtask,
+  // commitFormSubtaskEdit) keeps operating on the correct real row even when some are hidden.
+  const visibleFormSubtasks=formSubtasks.filter(s=>subtaskVisibleOnDate(s,todayKey()));
+  wrap.innerHTML=visibleFormSubtasks.map(s=>{
+    const i=formSubtasks.indexOf(s);
     const p=subRowParts(s);
-    if(isDateScopedCategory) p.done=subtaskDoneForDate(s,todayKey(),existingTask);
+    // Always date-scope "done" now, not just for a recurring category's own checklist — a
+    // live-linked row's isCheckedOn read is correct for any parent (see subtaskDoneForDate's
+    // 2026-07-21 fix), and a plain row's own doneDates/done fallback already handles the rest.
+    p.done=subtaskDoneForDate(s,todayKey(),existingTask);
     // 2026-07-15, per Brody: this icon never actually opened the linked task — it was purely
     // decorative (just a "this is a live link" marker), no onclick at all, unlike the equivalent
     // icon on the auto-member rows just above (which already opens via openForm). Now it does too.
