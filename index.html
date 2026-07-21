@@ -496,7 +496,14 @@
   .card-checklist-row .subtask-text{font-size:13px;color:var(--text2);flex:1}
   .note-body{padding:6px 12px 10px 42px;font-size:13px;color:var(--text2);border-top:1px solid var(--border);background:var(--bg3);line-height:1.6}
   /* Live task-reference checklist rows ("pulled" tasks) */
-  .subtask-linked-icon{font-size:10px;color:var(--blue-text);opacity:.85;flex-shrink:0;cursor:default}
+  /* 2026-07-21, per Brody: every checklist row that points at a real task now uses the SAME blue
+     link icon and is clickable to open that task — no more grey-vs-blue distinction by auto/manual.
+     cursor:pointer since every usage is now click-to-open (previously default since most weren't). */
+  .subtask-linked-icon{font-size:10px;color:var(--blue-text);opacity:.85;flex-shrink:0;cursor:pointer}
+  /* Small recurring badge shown next to a checklist row's link icon when the real task behind it
+     recurs — this is the one thing that still visually marks "auto-pulled on its scheduled day"
+     apart from a one-off manual pull, replacing the old grey/blue color distinction entirely. */
+  .checklist-recur-badge{font-size:9px;color:var(--text3);opacity:.7;margin-left:3px;flex-shrink:0}
   .ref-missing .subtask-text{opacity:.5;font-style:italic}
   .tb-cl-link{font-size:8px;color:rgba(255,255,255,.5);margin-left:3px;flex-shrink:0}
   .pull-task-btn{display:inline-flex;align-items:center;background:var(--bg3);border:1px solid rgba(255,255,255,.22);color:var(--text2);border-radius:7px;padding:6px 11px;font-size:13.5px;cursor:pointer;margin-top:6px}
@@ -2840,11 +2847,13 @@ function categoryCardHTML(grp,name,scheduleTask,items,doneToday,memberTasks){
     const rowOpenClick=s.refTaskId?` onclick="event.stopPropagation();openForm('${String(s.refTaskId).replace(/'/g,"\\'")}')"`:'';
     const linkedRt=s.refTaskId?tasks.find(x=>x.id===s.refTaskId):null;
     const rowTime=linkedRt?effectiveTimeFor(linkedRt,tk):null;
+    // 2026-07-21, per Brody: uniform blue clickable link icon + recurring badge, same as everywhere else.
+    const rowRecurBadge=(linkedRt&&isRecurringTask(linkedRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
     return `<div class="card-checklist-row"${rowOpenClick} style="cursor:${s.refTaskId?'pointer':'default'}">
       <button type="button" class="subtask-check${p.done?' done':''}" onclick="${checkOnclick}">${p.done?'<i class="fa fa-check"></i>':''}</button>
       <span class="subtask-text${p.done?' done':''}">${escHtml(p.title)}</span>
       ${rowTimeTagHTML(rowTime)}
-      ${s.refTaskId?'<i class="fa fa-link" style="font-size:10px;opacity:.5;margin-left:4px" title="Live-linked task"></i>':''}
+      ${s.refTaskId?`<i class="fa fa-link subtask-linked-icon" title="Live-linked task — click to open"></i>${rowRecurBadge}`:''}
     </div>`;
   }).join('');
   const inlineMemberRowsHTML=memberTasks.map(mt=>{
@@ -2853,11 +2862,15 @@ function categoryCardHTML(grp,name,scheduleTask,items,doneToday,memberTasks){
     // 2026-07-21, per Brody: same remove-from-today x every other checklist row has now — never
     // deletes the real task, just takes it off today (skips today for a recurring one, unschedules
     // a one-off) — see removeAutoMemberFromToday.
+    // 2026-07-21, per Brody: same uniform blue, clickable link icon as every other checklist row —
+    // no more grey/blue distinction; a small recurring badge next to it is the one remaining cue
+    // for "auto-pulled on its own schedule."
+    const recurBadge=isRecurringTask(mt)?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
     return `<div class="card-checklist-row" style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeMtId}')">
       <button type="button" class="subtask-check${checked?' done':''}" onclick="event.stopPropagation();toggle('${safeMtId}')">${checked?'<i class="fa fa-check"></i>':''}</button>
       <span class="subtask-text${checked?' done':''}">${escHtml(mt.title)}</span>
       ${rowTimeTagHTML(effectiveTimeFor(mt,tk))}
-      <i class="fa fa-link" style="font-size:10px;opacity:.5;margin-left:4px" title="Filed under this category — always shows here automatically"></i>
+      <i class="fa fa-link subtask-linked-icon" onclick="event.stopPropagation();openForm('${safeMtId}')" title="Filed under this category — click to open"></i>${recurBadge}
       <button type="button" class="subtask-remove" title="Remove from today's checklist — never deletes the task itself" onclick="event.stopPropagation();removeAutoMemberFromToday('${safeMtId}','${tk}');renderAll3()">&times;</button>
     </div>`;
   }).join('');
@@ -3531,13 +3544,22 @@ function renderAllDetailPanel(){
            onblur="allDetailCommitEditSubtask('${s.id}',this.value)"
            onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}else if(event.key==='Escape'){event.preventDefault();allDetailCancelEditSubtask();}">`
       : `<span class="subtask-text${p.done?' done':''}"${s.refTaskId?'':` onclick="allDetailStartEditSubtask('${s.id}')" title="Click to rename"`}>${escHtml(p.title)}</span>`;
+    // 2026-07-21, per Brody: this panel used to only show a remove x for a plain typed row —
+    // a linked row (refTaskId) had no way to be removed from here at all. Now every row gets the
+    // same blue, clickable link icon (+ a small recurring badge when the real task recurs) AND its
+    // own remove x, unconditionally, matching every other checklist location in the app.
+    const linkRt=s.refTaskId?tasks.find(x=>x.id===s.refTaskId):null;
+    const safeLinkRefId=linkRt?String(linkRt.id).replace(/'/g,"\\'"):'';
+    const linkRecurBadge=(linkRt&&isRecurringTask(linkRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
+    const linkIconHTML=s.refTaskId?`<i class="fa fa-link subtask-linked-icon"${safeLinkRefId?` style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeLinkRefId}')"`:''} title="${linkRt?'Live-linked task — click to open':'Linked task was deleted'}"></i>${linkRecurBadge}`:'';
     return `<div class="checklist-row" draggable="true"
       ondragstart="allDetailChecklistDragStart(event,${i})" ondragover="allDetailChecklistDragOver(event,${i})"
       ondragleave="allDetailChecklistDragLeave(event)" ondrop="allDetailChecklistDrop(event,${i})" ondragend="allDetailChecklistDragEnd(event)">
       <i class="fa fa-bars checklist-grip" title="Drag to reorder"></i>
       <button type="button" class="subtask-check${p.done?' done':''}" onclick="allDetailToggleChecklistItem('${s.id}')">${p.done?'<i class="fa fa-check"></i>':''}</button>
       ${textHTML}
-      ${s.refTaskId?`<i class="fa fa-link subtask-linked-icon" title="Live-linked task"></i>`:`<button type="button" class="subtask-remove" title="Remove" onclick="allDetailRemoveChecklistItem('${s.id}')">&times;</button>`}
+      ${linkIconHTML}
+      <button type="button" class="subtask-remove" title="Remove" onclick="allDetailRemoveChecklistItem('${s.id}')">&times;</button>
     </div>`;
   }).join('') + (t.scheduledTime?allDetailTimeBlockPoolRowsHTML(t.id):'');
   contentEl.innerHTML=`
@@ -3610,13 +3632,21 @@ function renderAllCategoryDetailPanel(emptyEl,contentEl){
     const i=ownSubtasks.indexOf(s);
     const p=subRowParts(s);
     p.done=subtaskDoneForDate(s,todayKey(),scheduleTask);
+    // 2026-07-21, per Brody: same fix as the plain-task quick-view — a linked row here had no way
+    // to be removed at all before. Every row now gets the same blue, clickable link icon (+ a
+    // recurring badge when the real task recurs) AND its own remove x, unconditionally.
+    const linkRt=s.refTaskId?tasks.find(x=>x.id===s.refTaskId):null;
+    const safeLinkRefId=linkRt?String(linkRt.id).replace(/'/g,"\\'"):'';
+    const linkRecurBadge=(linkRt&&isRecurringTask(linkRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
+    const linkIconHTML=s.refTaskId?`<i class="fa fa-link subtask-linked-icon"${safeLinkRefId?` style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeLinkRefId}')"`:''} title="${linkRt?'Live-linked task — click to open':'Linked task was deleted'}"></i>${linkRecurBadge}`:'';
     return `<div class="checklist-row" draggable="true"
       ondragstart="allCategoryDetailChecklistDragStart(event,${i})" ondragover="allCategoryDetailChecklistDragOver(event,${i})"
       ondragleave="allCategoryDetailChecklistDragLeave(event)" ondrop="allCategoryDetailChecklistDrop(event,${i})" ondragend="allCategoryDetailChecklistDragEnd(event)">
       <i class="fa fa-bars checklist-grip" title="Drag to reorder"></i>
       <button type="button" class="subtask-check${p.done?' done':''}" onclick="toggleSubtaskDone('${scheduleTask.id}','${s.id}');renderAllDetailPanel();renderAll()">${p.done?'<i class="fa fa-check"></i>':''}</button>
       <span class="subtask-text${p.done?' done':''}">${escHtml(p.title)}</span>
-      ${s.refTaskId?`<i class="fa fa-link subtask-linked-icon" title="Live-linked task"></i>`:`<button type="button" class="subtask-remove" title="Remove" onclick="allCategoryDetailRemoveSubtask('${s.id}')">&times;</button>`}
+      ${linkIconHTML}
+      <button type="button" class="subtask-remove" title="Remove" onclick="allCategoryDetailRemoveSubtask('${s.id}')">&times;</button>
     </div>`;
   }).join('');
   const poolRows=poolDayItemsForDate(grp,name,todayKey());
@@ -3643,14 +3673,15 @@ function renderAllCategoryDetailPanel(emptyEl,contentEl){
     const safeId=t.id.replace(/'/g,"\\'");
     const dupTag=t.categoryDuplicate?`<i class="fa fa-clone" style="font-size:10.5px;color:var(--text3);opacity:.75;margin-left:4px" title="Duplicated from the &quot;${escHtml(t.categoryDuplicate.name)}&quot; category"></i>`:'';
     // 2026-07-21, per Brody: same "remove from today's checklist, never delete the real task" x
-    // every other checklist row now has — see removeAutoMemberFromToday. The grey link icon (vs the
-    // blue one a manual pull's row gets) is the one deliberate visual difference kept, per Brody:
-    // "we can keep the grey vs the blue to differentiate a recurring/auto task."
+    // every other checklist row now has — see removeAutoMemberFromToday. Icon redesign, same day:
+    // grey vs. blue is retired in favor of a uniform blue, clickable link icon everywhere, with a
+    // small recurring badge alongside it when the real task actually recurs.
+    const recurBadge=isRecurringTask(t)?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
     return `<div class="checklist-row" title="Task filed under this category">
       <button type="button" class="subtask-check${checked?' done':''}" onclick="toggle('${safeId}');renderAllDetailPanel();renderAll()">${checked?'<i class="fa fa-check"></i>':''}</button>
       <span class="subtask-text${checked?' done':''}" style="cursor:pointer" onclick="selectAllTaskDetail('${safeId}')">${escHtml(t.title)}</span>
       ${dupTag}
-      <i class="fa fa-link" style="font-size:10px;color:var(--text3);opacity:.7;margin-left:4px" title="Filed under this category — always shows here automatically"></i>
+      <i class="fa fa-link subtask-linked-icon" onclick="event.stopPropagation();openForm('${safeId}')" title="Filed under this category — click to open"></i>${recurBadge}
       <button type="button" class="subtask-remove" title="Remove from today's checklist — never deletes the task itself" onclick="removeAutoMemberFromToday('${safeId}',todayKey());renderAllDetailPanel();renderAll()">&times;</button>
     </div>`;
   }).join('');
@@ -4698,11 +4729,12 @@ function taskCardHTML(t,showDate,compact,dateKey,tintByGroup,focusDraggable){
         const rowOpenClick=s.refTaskId?` onclick="event.stopPropagation();openForm('${String(s.refTaskId).replace(/'/g,"\\'")}')"`:'';
         const linkedRt=s.refTaskId?tasks.find(x=>x.id===s.refTaskId):null;
         const rowTime=linkedRt?effectiveTimeFor(linkedRt,dk):null;
+        const wkRecurBadge=(linkedRt&&isRecurringTask(linkedRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
         return `<div class="card-checklist-row"${rowOpenClick} style="cursor:${s.refTaskId?'pointer':'default'}">
           <button type="button" class="subtask-check${p.done?' done':''}" onclick="event.stopPropagation();toggleSubtaskDone('${t.id}','${safeSId}','${dk}');renderAll3()">${p.done?'<i class="fa fa-check"></i>':''}</button>
           <span class="subtask-text${p.done?' done':''}">${escHtml(p.title)}</span>
           ${rowTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(rowTime)}</span>`:''}
-          ${s.refTaskId?'<i class="fa fa-link" style="font-size:10px;opacity:.5;margin-left:4px" title="Live-linked task"></i>':''}
+          ${s.refTaskId?`<i class="fa fa-link subtask-linked-icon" title="Live-linked task — click to open"></i>${wkRecurBadge}`:''}
         </div>`;
       }).join('');
       const memberRowsHTML=isCategory?categoryAutoMemberTasksForBlock(t,dk).map(mt=>{
@@ -4712,11 +4744,12 @@ function taskCardHTML(t,showDate,compact,dateKey,tintByGroup,focusDraggable){
         // 2026-07-21, per Brody: same remove-from-this-day x every other checklist row has —
         // scoped to dk (this specific Weekly View day), not always today, since this card can
         // render any day of the week, not just today.
+        const wkMemberRecurBadge=isRecurringTask(mt)?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
         return `<div class="card-checklist-row" style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeMtId}')">
           <button type="button" class="subtask-check${checked?' done':''}" onclick="event.stopPropagation();toggle('${safeMtId}')">${checked?'<i class="fa fa-check"></i>':''}</button>
           <span class="subtask-text${checked?' done':''}">${escHtml(mt.title)}</span>
           ${mtTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(mtTime)}</span>`:''}
-          <i class="fa fa-link" style="font-size:10px;opacity:.5;margin-left:4px" title="Filed under this category — always shows here automatically"></i>
+          <i class="fa fa-link subtask-linked-icon" onclick="event.stopPropagation();openForm('${safeMtId}')" title="Filed under this category — click to open"></i>${wkMemberRecurBadge}
           <button type="button" class="subtask-remove" title="Remove from this day's checklist — never deletes the task itself" onclick="event.stopPropagation();removeAutoMemberFromToday('${safeMtId}','${dk}');renderAll3()">&times;</button>
         </div>`;
       }).join(''):'';
@@ -4879,7 +4912,15 @@ function taskCardHTML(t,showDate,compact,dateKey,tintByGroup,focusDraggable){
       </div>
     </div>
     ${(!selectMode&&t.note&&expandedNotes[t.id])?`<div class="note-body" ${openRow}>${escHtml(t.note)}</div>`:''}
-    ${(!selectMode&&subtasks.length&&expandedChecklists[t.id])?`<div class="card-checklist" onclick="event.stopPropagation()">${subtasks.map(s=>{const p=subRowParts(s);return `<div class="card-checklist-row${p.missing?' ref-missing':''}"><button type="button" class="subtask-check${p.done?' done':''}" onclick="event.stopPropagation();toggleSubtaskDone('${t.id}','${s.id}')">${p.done?'<i class="fa fa-check"></i>':''}</button><span class="subtask-text${p.done?' done':''}">${escHtml(p.title)}</span>${s.refTaskId?`<i class="fa fa-link subtask-linked-icon" title="${p.missing?'Linked task was deleted':'Live-linked task — checking this completes it everywhere'}"></i>`:''}</div>`;}).join('')}</div>`:''}
+    ${(!selectMode&&subtasks.length&&expandedChecklists[t.id])?`<div class="card-checklist" onclick="event.stopPropagation()">${subtasks.map(s=>{
+      const p=subRowParts(s);
+      // 2026-07-21, per Brody: same uniform blue, clickable link icon + recurring badge as every
+      // other checklist row — this one had the color but no click and no recurring badge.
+      const cardRt=(s.refTaskId&&!p.missing)?tasks.find(x=>x.id===s.refTaskId):null;
+      const cardSafeRefId=cardRt?String(cardRt.id).replace(/'/g,"\\'"):'';
+      const cardRecurBadge=(cardRt&&isRecurringTask(cardRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
+      return `<div class="card-checklist-row${p.missing?' ref-missing':''}"><button type="button" class="subtask-check${p.done?' done':''}" onclick="event.stopPropagation();toggleSubtaskDone('${t.id}','${s.id}')">${p.done?'<i class="fa fa-check"></i>':''}</button><span class="subtask-text${p.done?' done':''}">${escHtml(p.title)}</span>${s.refTaskId?`<i class="fa fa-link subtask-linked-icon"${cardSafeRefId?` onclick="event.stopPropagation();openForm('${cardSafeRefId}')"`:''} title="${p.missing?'Linked task was deleted':'Live-linked task — click to open, checking this completes it everywhere'}"></i>${cardRecurBadge}`:''}</div>`;
+    }).join('')}</div>`:''}
   </div>`;
 }
 
@@ -8144,9 +8185,12 @@ function virtualCategoryTrayCardHTML(group,name,members,poolItems,dateKey){
     // same rowTimeTagHTML idiom as categoryCardHTML.
     const mtTime=effectiveTimeFor(mt,dateKey);
     const timeTagHTML=mtTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(mtTime)}</span>`:'';
+    // 2026-07-21, per Brody: same uniform blue, clickable link icon + recurring badge as every
+    // other checklist row — this card never had a link icon at all before.
+    const recurBadge=isRecurringTask(mt)?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
     return `<div class="sidebar-task sidebar-subtask${checked?' done-task':''}" style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeId}')">
       <button class="check-btn ${checked?'done':''}" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();toggle('${safeId}')">${checked?'<i class="fa fa-check"></i>':''}</button>
-      <div class="sidebar-task-body"><div class="sidebar-task-title${checked?' done':''}">${escHtml(mt.title)}${timeTagHTML}</div></div>
+      <div class="sidebar-task-body"><div class="sidebar-task-title${checked?' done':''}">${escHtml(mt.title)}${timeTagHTML}<i class="fa fa-link subtask-linked-icon" onclick="event.stopPropagation();openForm('${safeId}')" title="Filed under this category — click to open"></i>${recurBadge}</div></div>
       <button class="sidebar-delete" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();removeAutoMemberFromToday('${safeId}','${dateKey}');renderPlanner();renderAll3()" title="Remove from today's checklist — never deletes the task itself">×</button>
     </div>`;
   }).join('');
@@ -8483,7 +8527,19 @@ function renderPlanner(){
       // rows) instead of a third copy of the same branch. Pool rows are untouched — separate legacy
       // system with its own send-back control, out of scope here.
       const removeBtn=r.pool?'':`<button type="button" class="tb-cl-remove" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();removeSidebarChecklistChild('${t.id}','${safeRowId}','${String(r.refTaskId||'').replace(/'/g,"\\'")}',${r.auto?'true':'false'},'${plannerDate}')" title="Remove from today's checklist — never deletes the task itself">×</button>`;
-      return `<div class="tb-cl-chip" onmousedown="event.stopPropagation()" onclick="${checkOnclick}"><button type="button" class="tb-cl-check${r.done?' done':''}" onmousedown="event.stopPropagation()" onclick="${checkOnclick}">${r.done?'<i class="fa fa-check"></i>':''}</button><span class="tb-cl-text${r.done?' done':''}">${escHtml(r.title)}</span>${rowTimeTag}${r.refTaskId?`<i class="fa fa-link tb-cl-link"${r.auto?' style="opacity:.55"':''} title="${r.auto?'Filed under this category — always shows here automatically':'Live-linked task'}"></i>`:''}${r.pool?'<i class="fa fa-tint tb-cl-link" title="Pool item"></i>':''}${expandBtn}${removeBtn}</div>${nested}`;
+      // 2026-07-21, per Brody: this was the main reported gap — this icon was purely decorative
+      // (no onclick at all, whole chip toggled done instead) and used a dim, non-blue color that
+      // never actually matched the "blue = live link" convention everywhere else. Now every linked
+      // row's icon is the same clickable blue link (stopPropagation so it opens the task instead of
+      // also toggling done), with a small recurring badge alongside when the real task recurs —
+      // replacing the old grey/blue-by-opacity auto distinction entirely.
+      const chipRt=(!r.pool&&r.refTaskId)?tasks.find(x=>x.id===r.refTaskId):null;
+      const chipRecurBadge=(chipRt&&isRecurringTask(chipRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
+      // Note: .tb-cl-link is declared after .subtask-linked-icon in the stylesheet, so it would
+      // otherwise win the cascade and silently keep this dim/grey instead of blue — inline style
+      // forces the color/size explicitly rather than fighting class order.
+      const chipLinkIcon=r.refTaskId?`<i class="fa fa-link tb-cl-link" style="color:var(--blue-text);opacity:.9;cursor:pointer" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();openForm('${String(r.refTaskId).replace(/'/g,"\\'")}')" title="${r.auto?'Filed under this category — click to open':'Live-linked task — click to open'}"></i>${chipRecurBadge}`:'';
+      return `<div class="tb-cl-chip" onmousedown="event.stopPropagation()" onclick="${checkOnclick}"><button type="button" class="tb-cl-check${r.done?' done':''}" onmousedown="event.stopPropagation()" onclick="${checkOnclick}">${r.done?'<i class="fa fa-check"></i>':''}</button><span class="tb-cl-text${r.done?' done':''}">${escHtml(r.title)}</span>${rowTimeTag}${chipLinkIcon}${r.pool?'<i class="fa fa-tint tb-cl-link" title="Pool item"></i>':''}${expandBtn}${removeBtn}</div>${nested}`;
     }).join('')}${hiddenRowCount?`<button type="button" class="tb-cl-more" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();openForm('${t.id.replace(/'/g,"\\'")}')" title="${hiddenRowCount} more item${hiddenRowCount===1?'':'s'} — click to see all"><i class="fa fa-ellipsis-h"></i> +${hiddenRowCount} more</button>`:''}</div>`:'';
     // A block too short for its own second row still gets a checklist preview — just squeezed into
     // the title row instead, to the right, per Brody's own suggestion. This reuses the exact same
@@ -8696,12 +8752,11 @@ function renderPlanner(){
         const rtChecked=plannerChecked(rt,plannerDate);
         const safeRtId=rt.id.replace(/'/g,"\\'");
         const childCheckOnclick=auto?`toggle('${safeRtId}')`:`toggleSubtaskDone('${safeHostId}','${safeRowId}','${plannerDate}')`;
-        // 2026-07-21, per Brody: grey vs blue link icon is the one visual cue kept to tell "auto
-        // member, filed under this category" apart from "manually pulled-in link" — everything else
-        // about the row (check, remove-from-today, star, lock) now works identically either way.
-        const childLinkIcon=auto
-          ?`<i class="fa fa-link" style="font-size:10px;color:var(--text3);margin-left:2px" title="Filed under this category — always shows here automatically"></i>`
-          :`<i class="fa fa-link subtask-linked-icon" title="Live-linked task"></i>`;
+        // 2026-07-21, per Brody: grey-vs-blue is retired — every linked row's icon is now the same
+        // blue, clickable link icon regardless of auto/manual, with a small recurring badge
+        // alongside it when the real task actually recurs.
+        const childRecurBadge=isRecurringTask(rt)?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
+        const childLinkIcon=`<i class="fa fa-link subtask-linked-icon" onclick="event.stopPropagation();openForm('${safeRtId}')" title="${auto?'Filed under this category — click to open':'Live-linked task — click to open'}"></i>${childRecurBadge}`;
         html+=`<div class="sidebar-task sidebar-subtask ${rtChecked?'done-task':''}" onmousedown="initTrayDrag(event,'${rt.id}',this,'sidebar-ghost')">
           <button class="check-btn ${rtChecked?'done':''}"
             onmousedown="event.stopPropagation()"
@@ -9919,39 +9974,35 @@ function renderPullTaskPickerBody(){
 function togglePullTaskPick(id,checked){
   if(id===editId)return;
   const t=tasks.find(x=>x.id===id);
+  if(!t)return;
   const forDate=pullPickerForDate();
   // 2026-07-21, per Brody: "that toggle in pull in tasks should function essentially the same as
   // the little x in the checklist itself, regardless of auto recurrence or not." An auto-member
-  // (Legs, filed directly under the category being edited, showing up because it's due/recurring
-  // today) used to be a dead click here (currentEditAutoMemberIds().has(id) just returned early) —
-  // now it toggles exactly like its own row's x does: off removes just today (skip a recurring
-  // member for forDate, unschedule a bare one-off member), back on undoes exactly that. Deliberately
-  // narrow: only for a task genuinely filed under THIS category (categoryRef match) that's either
-  // currently auto-included (isAutoMemberNow) or was explicitly taken off today by this same
-  // mechanism (skippedForDate/isBareMember) — a same-category sibling that just isn't naturally
-  // due/recurring today, and was never explicitly skipped, still falls through to a real manual
-  // link below unchanged (the v207 "pull in ANY sibling regardless of its own schedule" behavior).
-  const editingTask=editId?tasks.find(x=>x.id===editId):null;
-  const isOwnCategoryMember=!!(t&&editingTask&&editingTask.isCategoryBlock&&editingTask.categoryRef&&
-    t.group===editingTask.categoryRef.group&&t.category===editingTask.categoryRef.name);
-  if(isOwnCategoryMember){
-    const skippedForDate=isRecurringTask(t)&&(t.skippedDates||[]).includes(forDate);
-    const isBareMember=!isRecurringTask(t)&&!t.due;
-    const isAutoMemberNow=(t.due===forDate)||recurrenceMatchesDate(t,forDate);
-    if(!checked&&isAutoMemberNow){
-      removeAutoMemberFromToday(id,forDate);
-      renderFormSubtasks();
-      renderPullTaskPickerBody();
-      return;
-    }
-    if(checked&&(skippedForDate||isBareMember)){
-      if(isRecurringTask(t)) unskipTask(id,forDate);
-      else { t.due=forDate; save(); }
-      renderFormSubtasks();
-      renderPullTaskPickerBody();
-      return;
-    }
-    // else: falls through to the normal manual-link toggle below, same as any other task.
+  // (Legs, filed directly under the category, showing up because it's due/recurring today) used to
+  // be a dead click here. Turning one OFF now removes just today, exactly like its own checklist
+  // row's x (skip a recurring member for forDate, unschedule a bare one-off member) — gated on
+  // currentEditAutoMemberIds(), the exact live/current set (matches what's actually rendered as an
+  // auto-member row right now), not just "shares this category."
+  //
+  // 2026-07-21 bug found the same day: an EARLIER version of this gated on "shares this category"
+  // PLUS "isn't recurring and has no due date" for deciding whether turning one back ON should
+  // restore auto-membership (by setting a real due date) instead of doing a normal pull-in. That
+  // over-matched: Abs — a same-category but perfectly ordinary locked exercise, never actually an
+  // auto-member, just non-recurring with no due date like most locked tasks — satisfied that same
+  // shape and got its real due date silently stamped to today, instead of getting a normal link.
+  // Turning a row back ON now NEVER touches due/skippedDates — it always just falls through to the
+  // same ordinary manual pull-in every other task already uses below. A recurring member coming
+  // back this way still shows correctly (blue link + a recurring badge, see checklistLinkIconHTML),
+  // and tomorrow it resumes its own normal recurrence untouched regardless, since skippedDates only
+  // ever blocked that one specific day it was taken off.
+  if(!checked&&currentEditAutoMemberIds().has(id)){
+    removeAutoMemberFromToday(id,forDate);
+    renderFormSubtasks();
+    renderAll3(); // 2026-07-21 fix: this early-return path used to skip renderAll3() entirely, so
+                  // the calendar/sidebar behind this still-open modal kept showing stale state
+                  // until the modal closed — the "disconnect" Brody kept running into.
+    renderPullTaskPickerBody();
+    return;
   }
   if(checked){
     // 2026-07-14, per Brody: stamp the pull with whichever day this task-being-edited is actually
@@ -10514,11 +10565,15 @@ function renderFormSubtasks(){
       // 2026-07-15, per Brody: show a checklist item's own time next to its title here too.
       const mtTime=effectiveTimeFor(mt,todayKey());
       const mtTimeTag=mtTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(mtTime)}</span>`:'';
+      // 2026-07-21, per Brody: every checklist row's link icon is now the same blue, clickable icon
+      // regardless of auto/manual — the grey vs. blue distinction is retired in favor of a small
+      // recurring badge shown only when the real task behind the row actually recurs.
+      const recurBadge=isRecurringTask(mt)?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
       return `<div class="checklist-row" style="cursor:pointer" title="Filed under this category — click to open, due or recurring today; drag to reorder" draggable="true"
         ondragstart="autoMemberDragStart(event,${i})" ondragover="autoMemberDragOver(event,${i})"
         ondragleave="autoMemberDragLeave(event)" ondrop="autoMemberDrop(event,${i})" ondragend="autoMemberDragEnd(event)"
         onclick="openForm('${safeId}')">
-        <i class="fa fa-link checklist-grip" style="cursor:grab" title="Live-linked task — drag to reorder, click to open"></i>
+        <i class="fa fa-link subtask-linked-icon" title="Live-linked task — drag to reorder, click to open"></i>${recurBadge}
         <button type="button" class="subtask-check ${done?'done':''}" onclick="event.stopPropagation();toggleFormAutoMember('${safeId}')">${done?'<i class="fa fa-check"></i>':''}</button>
         <span class="subtask-text ${done?'done':''}">${escHtml(mt.title)}</span>
         ${mtTimeTag}
@@ -10547,7 +10602,12 @@ function renderFormSubtasks(){
     // decorative (just a "this is a live link" marker), no onclick at all, unlike the equivalent
     // icon on the auto-member rows just above (which already opens via openForm). Now it does too.
     const safeRefId=(s.refTaskId&&!p.missing)?String(s.refTaskId).replace(/'/g,"\\'"):'';
-    const linkIcon=s.refTaskId?`<i class="fa fa-link subtask-linked-icon"${safeRefId?` style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeRefId}')"`:''} title="${p.missing?'Linked task was deleted':'Live-linked to &quot;'+escHtml(p.title)+'&quot; — click to open it, checking this completes that task too, wherever it lives'}"></i>`:'';
+    // 2026-07-21, per Brody: add a small recurring badge next to the link icon when the real task
+    // behind this row recurs — the one remaining visual cue for "auto-pulled on its own schedule",
+    // now that every link icon everywhere is uniformly blue regardless of auto vs. manual.
+    const linkRt=s.refTaskId?tasks.find(x=>x.id===s.refTaskId):null;
+    const linkRecurBadge=(linkRt&&isRecurringTask(linkRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
+    const linkIcon=s.refTaskId?`<i class="fa fa-link subtask-linked-icon"${safeRefId?` style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeRefId}')"`:''} title="${p.missing?'Linked task was deleted':'Live-linked to &quot;'+escHtml(p.title)+'&quot; — click to open it, checking this completes that task too, wherever it lives'}"></i>${linkRecurBadge}`:'';
     // Plain rows only — a referenced row is already a real task, nothing to convert.
     const convertBtn=s.refTaskId?'':`<button type="button" class="subtask-convert" onclick="convertFormSubtaskToTask(${i})" title="Turn into its own task"><i class="fa fa-share-square"></i></button>`;
     // A deleted-link row has no real text behind it to edit — leave it as plain (italic) text.
