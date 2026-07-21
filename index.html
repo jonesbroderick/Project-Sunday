@@ -1170,6 +1170,19 @@
   .mobile-cal-block-time{font-size:10px;opacity:.85}
   .mobile-notime-header{font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.3px;margin:16px 0 8px}
   @media (max-width:700px){
+    /* 2026-07-22, per Brody (real-phone test): tapping into a field (worst on the checklist input)
+       made the popup go "wonky," blocking off half the screen, and the due-date field near the
+       bottom became unreachable no matter how far he scrolled. Root cause: .overlay's base rule
+       (way above) vertically CENTERS its content — fine normally, since .modal fills the whole
+       screen anyway, but the moment the keyboard opens and --vh shrinks .modal's height (see
+       below) to match the now-smaller visible area, flex-centering floated that shorter modal in
+       the MIDDLE of the old, keyboard-still-open screen instead of pinning it to the top — part of
+       it landed above the visible area, part below/behind the keyboard, and modal-body's own
+       scroll range couldn't reach far enough to compensate. Pinning to the top instead means the
+       header stays exactly where it always is and modal-body's height (and therefore its real
+       scrollable range) shrinks correctly with the keyboard, so every field — including the last
+       one — actually scrolls into the space still visible above it. */
+    .overlay{align-items:flex-start}
     .overlay{padding:0}
     /* 2026-07-21: compact mobile redesign of the edit-task popup — per Brody, "a small, mobile
        modified edit task prompt" instead of the full desktop layout. Deliberately still the SAME
@@ -13076,7 +13089,27 @@ function setRealVh(){
 }
 setRealVh();
 window.addEventListener('resize',setRealVh);
-if(window.visualViewport)window.visualViewport.addEventListener('resize',setRealVh);
+if(window.visualViewport){
+  window.visualViewport.addEventListener('resize',setRealVh);
+  // 2026-07-22: iOS also fires 'scroll' on visualViewport (not just 'resize') while the keyboard
+  // is animating open/closed — resize alone sometimes lagged a beat behind the keyboard actually
+  // being up, which is part of why the popup looked "wonky" mid-transition. Same handler either way.
+  window.visualViewport.addEventListener('scroll',setRealVh);
+}
+// 2026-07-22, per Brody (real-phone test): tapping the checklist input (or any field near the
+// bottom of the popup) could still leave it sitting right at the keyboard's edge even with the
+// top-anchoring/--vh fixes above — this is a direct nudge on top of those: whatever just got focus
+// inside the edit-task popup scrolls itself fully into view a moment after the keyboard finishes
+// animating in, so the field you're about to type into is never half-hidden. 250ms roughly matches
+// iOS's own keyboard-open animation; harmless if it fires while nothing needs scrolling.
+document.addEventListener('focusin',function(e){
+  const modal=document.getElementById('modal');
+  if(!modal||modal.style.display==='none')return;
+  if(!modal.contains(e.target))return;
+  const tag=e.target.tagName;
+  if(tag!=='INPUT'&&tag!=='TEXTAREA'&&tag!=='SELECT')return;
+  setTimeout(()=>{ e.target.scrollIntoView({block:'center',behavior:'smooth'}); },250);
+});
 
 // 2026-07-21: belt-and-suspenders pinch-zoom lock for Dolo — the viewport meta's user-scalable=no
 // handles most browsers, but some iOS Safari versions ignore that under Settings > Accessibility >
