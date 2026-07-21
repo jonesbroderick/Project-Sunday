@@ -691,8 +691,14 @@
   #f-title.done{text-decoration:line-through;color:var(--text2)}
   #f-subtask-input{font-size:13px;padding:7px 9px;margin-bottom:0}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-  .time-dur-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .time-dur-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px}
   .time-dur-col{position:relative}
+  /* 2026-07-21, per Brody: Time/Duration don't need to take up as much room as every other field —
+     smaller label, tighter padding/font on the picker button + select, no bottom margin since the
+     row itself already carries the spacing below. Desktop only; the mobile media query further down
+     still forces 16px on these to avoid the iOS auto-zoom-on-focus bug, unaffected by this. */
+  .time-dur-col .field-label{margin-bottom:2px;font-size:12px}
+  .time-dur-col .time-picker-btn,.time-dur-col select{padding:5px 8px;font-size:13px;margin-bottom:0}
   .time-picker-btn{width:100%;display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--bg3);border:1px solid rgba(255,255,255,.22);border-radius:8px;color:var(--text);font-size:15.5px;cursor:pointer;text-align:left;font-family:inherit;margin-bottom:10px}
   .time-picker-btn:focus,.time-picker-btn:hover{border-color:var(--blue);outline:none}
   .time-picker-list{position:absolute;top:calc(100% - 8px);left:0;right:0;background:var(--bg2);border:1px solid rgba(255,255,255,.22);border-radius:8px;overflow-y:auto;max-height:200px;z-index:300;box-shadow:0 8px 28px rgba(0,0,0,.5)}
@@ -1408,15 +1414,6 @@
         <select id="f-category" onchange="onCategorySelectChange()" onkeydown="if(event.key==='Enter'){event.preventDefault();exitFieldTyping(this);}">
           <option value="">— No group —</option>
         </select>
-      </div>
-    </div>
-    <div>
-      <label class="field-label">Tags <span style="color:var(--text3)">(optional)</span></label>
-      <div class="tag-input-wrap">
-        <div class="tag-chip-row" id="form-tag-chips"></div>
-        <input type="text" id="f-tag-input" placeholder="Add a tag, press Enter to add" autocomplete="off"
-          oninput="renderTagAutocomplete()" onkeydown="tagInputKeydown(event)" onblur="setTimeout(hideTagAutocomplete,150)">
-        <div class="tag-autocomplete" id="tag-autocomplete" style="display:none"></div>
       </div>
     </div>
     <div class="grid2">
@@ -9572,7 +9569,11 @@ function applyBulkEdit(){
     // Reuse toggle() rather than writing t.done directly — it already handles completedAt,
     // completedDates and streak side-effects correctly, so a bulk "mark complete" behaves
     // identically to checking each task off by hand, one at a time.
-    if(bulkEditComplete!==null && !!t.done!==bulkEditComplete)toggle(id);
+    // 2026-07-21 fix: compare against plannerChecked (the same completedDates-aware read the
+    // checkbox itself displays), not raw t.done — for a recurring task, raw done can already have
+    // reset back to false while it's still "done for today," which used to make this think a
+    // recurring task wasn't done yet and toggle it (marking it done a second time).
+    if(bulkEditComplete!==null && plannerChecked(t,todayKey())!==bulkEditComplete)toggle(id);
   });
   save();
   closeBulkEditModal();
@@ -9621,14 +9622,28 @@ function searchInputKeydown(e){
 function toggle(id){
   const t=tasks.find(t=>t.id===id);
   if(!t)return;
-  const becomingDone=!t.done;
-  t.done=!t.done;t.completedAt=t.done?Date.now():null;
+  const todayTk=todayKey();
+  // 2026-07-21 fix, per Brody's repro that the stuck-checkbox bug was STILL happening for recurring
+  // tasks specifically (after the Firestore echo-race fix cleared it up for non-recurring ones): this
+  // used to decide check vs. uncheck off the raw t.done flag — but a recurring task's raw done resets
+  // itself back to false ~1.2s after being checked (the auto-advance timer just below), while the
+  // CHECKBOX'S OWN displayed state (plannerChecked/isCheckedOn, everywhere in the app) reads
+  // completedDates instead, never raw done, specifically so the box stays visibly checked through
+  // that reset. Once the reset fired, raw done no longer matched what was on screen — so the NEXT
+  // click, still driven by raw done, silently read as "mark done again" (a no-op, since
+  // completedDates already had today) instead of "un-check," permanently jamming that checkbox for
+  // the rest of the day. Recurring tasks (and a Group's own backing task, isCategory — see
+  // plannerChecked's own comment for why it gets the same treatment) now decide check/uncheck off the
+  // exact same completedDates-based read the checkbox itself displays, so the two can never disagree.
+  // Plain tasks are untouched — their raw done never auto-resets, so there was never a desync there.
+  const usesCompletedDatesLog=isRecurringTask(t)||t.isCategory;
+  const becomingDone=usesCompletedDatesLog?!isCheckedOn(t,todayTk):!t.done;
+  t.done=becomingDone;t.completedAt=becomingDone?Date.now():null;
   // Per-date completion log — separate from the done/due rolling cycle below, and never read by
   // any of the existing recurrence/streak/overdue logic. Lets the Day Planner show a persistent
   // "checked" state for the rest of the calendar day a recurring task was completed on, even after
   // the ~1.2s reset further down flips done/completedAt back for the next cycle. See isCheckedOn().
   if(!t.completedDates)t.completedDates=[];
-  const todayTk=todayKey();
   if(becomingDone){
     if(!t.completedDates.includes(todayTk))t.completedDates.push(todayTk);
   }else{
@@ -9644,10 +9659,15 @@ function toggle(id){
   }
   save();renderAll3();
   // Auto-advance recurring tasks: after a short pause to show the check, reset
-  if(t.done && t.recurrence && t.recurrence.type!=='never'){
+  if(becomingDone && t.recurrence && t.recurrence.type!=='never'){
     setTimeout(()=>{
       const task=tasks.find(x=>x.id===id);
       if(!task)return;
+      // 2026-07-21 fix: this stale timer used to fire unconditionally, even if the user had already
+      // toggled the task back off in the meantime — silently bumping its due date forward via
+      // getCaughtUpDueDate as if it were still completed. Bail out if it's no longer checked for
+      // today; whatever the user did more recently is the correct state, not this leftover timer.
+      if(!isCheckedOn(task,todayTk))return;
       task.due=getCaughtUpDueDate(task);
       task.done=false;
       task.completedAt=null;
@@ -11205,7 +11225,7 @@ function subtaskInputKeydown(e){
 }
 
 // The order fields sit in, top to bottom, for arrow-key navigation in the task screen.
-const MODAL_NAV_FIELDS=['f-title','f-subtask-input','f-note','f-group','f-category','f-tag-input','f-due','f-recur-type','time-picker-btn','f-duration'];
+const MODAL_NAV_FIELDS=['f-title','f-subtask-input','f-note','f-group','f-category','f-due','f-recur-type','time-picker-btn','f-duration'];
 
 // Removes the highlight ring from every field (used both when a field gets actively focused,
 // and as a reset before moving the highlight to a new field).
