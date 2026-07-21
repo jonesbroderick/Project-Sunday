@@ -9790,9 +9790,13 @@ function pullPickerForDate(){
 }
 function pullTaskRowHTML(t){
   // 2026-07-16 fix: an auto-member of the category block being edited is already showing in this
-  // checklist on its own (see currentEditAutoMemberIds above) — treat it as permanently selected,
-  // not toggleable here, so it can't get a second real link pulled on top of itself. Clicking it
-  // opens the task instead, same as its auto-member row in the checklist itself already does.
+  // checklist on its own (see currentEditAutoMemberIds above) — treated as permanently selected here.
+  // 2026-07-21 fix, per Brody: "that toggle in pull in tasks should function essentially the same
+  // as the little x in the checklist itself, regardless of auto recurrence or not" — this used to
+  // open the task's own edit form instead of toggling, since there was no link row for an
+  // auto-member to toggle. Now clicks through togglePullTaskPick just like every other row; that
+  // function has its own branch (see below) that knows what "off"/"back on" means for an
+  // auto-member specifically (skip/unschedule vs. unskip/reschedule) instead of a real link.
   const isAutoMember=pullPickerAutoMemberIds.has(t.id);
   // 2026-07-21 fix, per Brody: this used to check raw existence in formSubtasks — true the moment
   // ANY link row for this task existed, even a dormant one whose day had already passed (a
@@ -9805,8 +9809,8 @@ function pullTaskRowHTML(t){
   const selected=isAutoMember||formSubtasks.some(s=>s.refTaskId===t.id&&subtaskVisibleOnDate(s,pd));
   const safeId=t.id.replace(/'/g,"\\'");
   const recurTag=isRecurringTask(t)&&t.done?'<i class="fa fa-refresh" style="font-size:11px;color:var(--text3);margin-right:4px" title="Recurring — done for today, resets on its next cycle"></i>':'';
-  const clickAttr=isAutoMember?`onclick="openForm('${safeId}')"`:`onclick="togglePullTaskPick('${safeId}',${!selected})"`;
-  const title=isAutoMember?'Already in this checklist automatically — it\'s filed under this category and due/recurring today. Click to open it.':(selected?'Pulled in — click to send back':'Click to pull in');
+  const clickAttr=`onclick="togglePullTaskPick('${safeId}',${!selected})"`;
+  const title=isAutoMember?'Filed under this category, due/recurring today — click to remove from today\'s checklist (same as the x there), same as any other row here.':(selected?'Pulled in — click to send back':'Click to pull in');
   return `<div class="checklist-row checklist-row-toggle${selected?' pick-row-selected':''}" ${clickAttr} title="${title}">
     <button type="button" class="subtask-check${selected?' done':''}" tabindex="-1">${selected?'<i class="fa fa-check"></i>':''}</button>
     <span class="subtask-text">${recurTag}${escHtml(t.title)}</span>
@@ -9913,15 +9917,48 @@ function renderPullTaskPickerBody(){
 // he can keep browsing and toggling several tasks in one pass — closing is just the × button or
 // clicking outside, same as any other modal in the app.
 function togglePullTaskPick(id,checked){
+  if(id===editId)return;
+  const t=tasks.find(x=>x.id===id);
+  const forDate=pullPickerForDate();
+  // 2026-07-21, per Brody: "that toggle in pull in tasks should function essentially the same as
+  // the little x in the checklist itself, regardless of auto recurrence or not." An auto-member
+  // (Legs, filed directly under the category being edited, showing up because it's due/recurring
+  // today) used to be a dead click here (currentEditAutoMemberIds().has(id) just returned early) —
+  // now it toggles exactly like its own row's x does: off removes just today (skip a recurring
+  // member for forDate, unschedule a bare one-off member), back on undoes exactly that. Deliberately
+  // narrow: only for a task genuinely filed under THIS category (categoryRef match) that's either
+  // currently auto-included (isAutoMemberNow) or was explicitly taken off today by this same
+  // mechanism (skippedForDate/isBareMember) — a same-category sibling that just isn't naturally
+  // due/recurring today, and was never explicitly skipped, still falls through to a real manual
+  // link below unchanged (the v207 "pull in ANY sibling regardless of its own schedule" behavior).
+  const editingTask=editId?tasks.find(x=>x.id===editId):null;
+  const isOwnCategoryMember=!!(t&&editingTask&&editingTask.isCategoryBlock&&editingTask.categoryRef&&
+    t.group===editingTask.categoryRef.group&&t.category===editingTask.categoryRef.name);
+  if(isOwnCategoryMember){
+    const skippedForDate=isRecurringTask(t)&&(t.skippedDates||[]).includes(forDate);
+    const isBareMember=!isRecurringTask(t)&&!t.due;
+    const isAutoMemberNow=(t.due===forDate)||recurrenceMatchesDate(t,forDate);
+    if(!checked&&isAutoMemberNow){
+      removeAutoMemberFromToday(id,forDate);
+      renderFormSubtasks();
+      renderPullTaskPickerBody();
+      return;
+    }
+    if(checked&&(skippedForDate||isBareMember)){
+      if(isRecurringTask(t)) unskipTask(id,forDate);
+      else { t.due=forDate; save(); }
+      renderFormSubtasks();
+      renderPullTaskPickerBody();
+      return;
+    }
+    // else: falls through to the normal manual-link toggle below, same as any other task.
+  }
   if(checked){
-    if(id===editId)return;
-    if(currentEditAutoMemberIds().has(id))return; // already showing as an auto-member row — nothing to pull
     // 2026-07-14, per Brody: stamp the pull with whichever day this task-being-edited is actually
     // FOR (its own due-date field, live in the form) rather than always "today" — pulling a task
     // into, say, Wednesday's Calls checklist while editing that Wednesday block should scope the
     // pull to Wednesday, not silently to today (see subtaskVisibleOnDate above). Falls back to
     // today for a brand-new task with no due date set yet.
-    const forDate=pullPickerForDate();
     // 2026-07-21 fix, per Brody: "regardless of whether tasks are locked, recurring, etc., I should
     // be able to pull in and move out tasks of checklists any time." This used to only push a fresh
     // row if NO row existed for this task at all — so re-pulling a task that already had a dormant
