@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Project Sunday</title>
 <!-- 2026-07-16: Add-to-Home-Screen setup (task #5) — lets Brody's iPhone treat this like a real
      installed app (own icon, no Safari address bar, dark status bar) once it's opened from Safari
@@ -33,6 +33,14 @@
     --low-bg:#152215;--low-text:#5cb85c;--low-border:#205020;
   }
   body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}
+  /* 2026-07-21: Dolo shouldn't ever need manual pinch/double-tap zoom — per Brody, "I have to
+     resize it so often... I just want the screen to be set in place like it is an app." The
+     viewport meta's user-scalable=no covers most browsers; touch-action:manipulation is the
+     modern belt-and-suspenders fix for iOS Safari's double-tap-to-zoom specifically (some iOS
+     versions ignore user-scalable=no under Settings > Accessibility > Zoom unless this is also
+     set). Applied html-wide, not just #mobile-app, since Blanc never triggers pinch/double-tap
+     zoom anyway (no touch input) — this is a no-op there.*/
+  html,body{touch-action:manipulation;-webkit-text-size-adjust:100%;text-size-adjust:100%}
   .app{max-width:1400px;margin:0 auto;padding:1.15rem 2rem 2rem}
   h1{font-size:23.5px;font-weight:500;margin-bottom:4px}
   .subtitle{font-size:14.5px;color:var(--text2);margin-bottom:0}
@@ -1121,7 +1129,6 @@
   .mobile-nav-btn{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:9px 0 calc(9px + env(safe-area-inset-bottom,0px));background:none;border:none;color:var(--text3);font-size:11px}
   .mobile-nav-btn.active{color:var(--blue)}
   .mobile-nav-btn i{font-size:18px}
-  .mobile-fab{position:fixed;right:18px;bottom:calc(76px + env(safe-area-inset-bottom,0px));width:54px;height:54px;border-radius:50%;background:var(--blue);color:#fff;border:none;font-size:22px;box-shadow:0 3px 10px rgba(0,0,0,.4);z-index:50}
   /* Calendar tab's actual time-grid — same visual idea as the desktop My Day calendar (hour rows,
      blocks positioned by time), just read/tap only: no drag, no resize, no inline quick-add. */
   .mobile-calendar-grid{position:relative;border-top:1px solid var(--border);margin-top:4px}
@@ -1136,7 +1143,43 @@
   .mobile-notime-header{font-size:12px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.3px;margin:16px 0 8px}
   @media (max-width:700px){
     .overlay{padding:0}
-    .modal{width:100vw;max-width:100vw;height:100vh;height:100dvh;max-height:100vh;border-radius:0}
+    /* 2026-07-21: compact mobile redesign of the edit-task popup — per Brody, "a small, mobile
+       modified edit task prompt" instead of the full desktop layout. Deliberately still the SAME
+       #modal/openForm() DOM and all the same field IDs (title, checklist, notes, group/category,
+       due date, repeat, time/duration) — no separate/forked modal — this is purely a responsive
+       layout change, same pattern the Calendar tab already uses (one data model, two purpose-built
+       layouts). Keeping one DOM means recurrence, checklist, and every other bit of form logic
+       can't drift between Blanc and Dolo. --vh is set by the small JS block below and is a more
+       reliable full-height measurement than 100vh/100dvh alone on iOS Safari once the keyboard
+       opens (some iOS versions resize the *visual* viewport, not the layout one, without dvh
+       updating) — falls back to 100dvh/100vh if JS hasn't run yet. */
+    .modal{
+      width:100vw;max-width:100vw;border-radius:0;
+      height:100vh;height:100dvh;height:calc(var(--vh,1vh) * 100);max-height:none;
+    }
+    /* Header (title + Done) and footer (Delete/Duplicate) are sticky, not just flex-shrink:0 —
+       belt-and-suspenders so Done is ALWAYS reachable no matter what the body is doing, even if a
+       future change accidentally lets modal-body's height get away from it. This is the direct fix
+       for "I can't click done to get out of there." */
+    .modal-header{position:sticky;top:0;z-index:5;background:var(--bg2);padding:1rem 1rem .75rem}
+    .modal-done-btn{padding:9px 18px;font-size:15px}
+    .modal-footer{position:sticky;bottom:0;z-index:5;background:var(--bg2);padding:.75rem 1rem calc(.75rem + env(safe-area-inset-bottom,0px))}
+    .modal-body{padding:0 1rem 4px}
+    /* Every field big enough (16px+) that iOS Safari never auto-zooms in on focus — this is very
+       likely the actual cause of Brody's "I have to resize it so often": the desktop form's normal
+       15.5px/13px field text is below iOS's auto-zoom threshold, so tapping ANY field (title,
+       notes, due date, checklist input...) was silently zooming the whole page in every time. */
+    .modal input[type=text],.modal input[type=date],.modal input[type=time],
+    .modal textarea,.modal select,#f-subtask-input{font-size:16px}
+    /* Two-column rows (Group/Category, Due date/Repeat, Time/Duration) don't fit a phone width —
+       stack to one column, full-width fields, same order as desktop reads top-to-bottom. */
+    .grid2,.time-dur-row{grid-template-columns:1fr}
+    /* Recurrence day-picker and checklist row controls sized up for a fingertip, not a cursor. */
+    .day-btn{flex:1;max-width:44px;height:auto;aspect-ratio:1;font-size:14px}
+    .day-picker{justify-content:space-between}
+    .subtask-check{width:21px;height:21px}
+    .subtask-remove{font-size:19px;padding:6px}
+    .form-star-btn,.form-lock-btn{font-size:17px;padding:6px}
     /* The Focus timer's floating button/panel lives outside .app (so it normally floats over every
        desktop view) — Brody explicitly doesn't want it on mobile at all, see "remove the focus tab." */
     #focus-fab,#focus-panel{display:none !important}
@@ -1230,7 +1273,6 @@
   </div>
   <div class="mobile-tab-pane" id="mobile-tab-calendar"></div>
   <div class="mobile-tab-pane active" id="mobile-tab-tasks"></div>
-  <button type="button" class="mobile-fab" onclick="mobileOpenAddTask()" title="Add task"><i class="fa fa-plus"></i></button>
   <div class="mobile-nav">
     <button type="button" class="mobile-nav-btn" id="mobile-nav-calendar" onclick="setMobileTab('calendar')"><i class="fa fa-calendar"></i><span>Calendar</span></button>
     <button type="button" class="mobile-nav-btn active" id="mobile-nav-tasks" onclick="setMobileTab('tasks')"><i class="fa fa-list-ul"></i><span>Tasks</span></button>
@@ -1986,9 +2028,13 @@ function toggleMobileShowCompleted(){
 function mobileQuickAddKey(e){
   if(e.key==='Enter'){ e.preventDefault(); mobileQuickAddTask(); }
 }
-// Same "plain, unfiled task, no due date" shape the desktop's own flat Tasks quick-add already
-// creates — group/category are pre-filled from whichever pills are currently selected (skipped for
-// "Today"/"Tasks", same as leaving group blank on the desktop form).
+// Group/category are pre-filled from whichever pills are currently selected (skipped for "Tasks",
+// same as leaving group blank on the desktop form). Fixed 2026-07-21 per Brody: typing straight
+// into the "Today" pill used to create a plain unfiled task with NO due date, so it only ever
+// showed up under the ungrouped "Tasks" pill, never on Today itself — same gap as the desktop flat
+// Tasks quick-add. Now defaults due to todayKey() whenever added from Today, so it actually lands
+// on today's list; group/category still stay blank (it lives in ungrouped "Tasks" until Brody
+// files it under a real category later), matching how every other "add from Today" path behaves.
 function mobileQuickAddTask(){
   const input=document.getElementById('mobile-quick-add-input');
   const title=(input?input.value:'').trim();
@@ -1996,10 +2042,11 @@ function mobileQuickAddTask(){
   const isRealGroup=mobileGrpFilter&&mobileGrpFilter!=='today'&&mobileGrpFilter!==UNGROUPED_GRP;
   const grp=isRealGroup?mobileGrpFilter:null;
   const cat=(isRealGroup&&mobileCategoryFilter&&mobileCategoryFilter!==CATEGORY_PILL_UNCATEGORIZED)?mobileCategoryFilter:null;
+  const due=(mobileGrpFilter==='today')?todayKey():null;
   const newTask={
     id:Date.now().toString()+Math.random().toString(36).slice(2,6),
     title,note:'',starred:false,group:grp,category:cat,locked:false,
-    due:null,scheduledTime:null,duration:null,
+    due,scheduledTime:null,duration:null,
     recurrence:{type:'never',days:[]},tags:[],subtasks:[],
     done:false,completedAt:null,completedDates:[],createdAt:Date.now()
   };
@@ -2007,25 +2054,6 @@ function mobileQuickAddTask(){
   input.value='';
   save();
   renderAll3();
-}
-// "+" FAB — mobile-only default group is the ungrouped "Tasks" bucket (per Brody: "the default
-// group [should] be the ungrouped 'Tasks' not Work because it's the first one there"), NOT GRPS[0]
-// like the desktop form defaults to. Reuses the exact same openForm()/modal the desktop uses (so
-// everything else about adding a task — recurrence, notes, checklist — stays identical); just
-// forces the group select to a blank/ungrouped value right after it opens, without touching
-// openForm/openFormCtx/populateGroupSelect themselves (desktop keeps defaulting to GRPS[0] on purpose).
-function mobileOpenAddTask(){
-  openForm(null,null,null,null);
-  const sel=document.getElementById('f-group');
-  if(sel){
-    if(!sel.querySelector('option[value=""]')){
-      const blankOpt=document.createElement('option');
-      blankOpt.value='';
-      blankOpt.textContent='Tasks (no group)';
-      sel.insertBefore(blankOpt,sel.firstChild);
-    }
-    sel.value='';
-  }
 }
 // Tasks tab: defaults to "Today" (per Brody: "I don't want it to be 'All' — I want it to be
 // 'Today' just like the browser version"); pills are colored by group (GRP_COLORS), matching every
@@ -12805,6 +12833,38 @@ document.addEventListener('click',function(e){
     },80);
   }
 })();
+
+// 2026-07-21: real-viewport-height custom property, used by the mobile edit-task modal's
+// height:calc(var(--vh,1vh) * 100) — 100vh/100dvh alone can lag behind on iOS Safari once the
+// keyboard opens (the layout viewport and the visual viewport disagree, and dvh doesn't always
+// re-fire in time), which is one likely cause of the popup feeling "cut off" with Done unreachable.
+// Recalculated on load, on rotation/resize, AND on visualViewport resize (fires specifically when
+// the keyboard shows/hides) so the modal always matches whatever's actually visible right now.
+function setRealVh(){
+  const vh=(window.visualViewport?window.visualViewport.height:window.innerHeight)*0.01;
+  document.documentElement.style.setProperty('--vh',vh+'px');
+}
+setRealVh();
+window.addEventListener('resize',setRealVh);
+if(window.visualViewport)window.visualViewport.addEventListener('resize',setRealVh);
+
+// 2026-07-21: belt-and-suspenders pinch-zoom lock for Dolo — the viewport meta's user-scalable=no
+// handles most browsers, but some iOS Safari versions ignore that under Settings > Accessibility >
+// Zoom unless gesturestart is also prevented in JS. No effect on Blanc (desktop has no pinch gesture).
+document.addEventListener('gesturestart',function(e){e.preventDefault();});
+// Also stop the classic "double-tap anywhere to zoom" on iOS Safari — touch-action:manipulation in
+// the CSS covers most of this, but this catches any element that slips through (e.g. plain divs
+// without a tap handler). Tracks the last tap's time+target; a second tap on the same spot within
+// 300ms is treated as a double-tap and suppressed instead of letting the browser zoom.
+let lastTapTime=0,lastTapTarget=null;
+document.addEventListener('touchend',function(e){
+  const now=Date.now();
+  if(now-lastTapTime<300&&lastTapTarget===e.target){
+    e.preventDefault();
+  }
+  lastTapTime=now;
+  lastTapTarget=e.target;
+},{passive:false});
 </script>
 </body>
 </html>
