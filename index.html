@@ -7434,11 +7434,17 @@ function renderAll(){
   // trying to use it or expand on it currently... maybe revisit down the line") — just the entry
   // point button; openSmartListModal()/activeSmartList and everything else behind it are left
   // alone in case it comes back later, it's just unreachable from here now.
-  // Select entry point (2026-07-01, broadened same day; moved 2026-07-22 to sit right before the
-  // settings gear instead of after it, per Brody): pick any tasks here, either to bundle them onto
-  // the calendar as a one-time Time Block, or to bulk-edit/bulk-delete them.
+  // Select entry point (2026-07-01, broadened same day; moved 2026-07-22 to sit at the very end of
+  // the row after the settings gear was removed, per Brody): pick any tasks here, either to bundle
+  // them onto the calendar as a one-time Time Block, or to bulk-edit/bulk-delete them.
+  // 2026-07-22, per Brody: the settings gear itself is gone too — openGroupModal() only ever did
+  // what right-clicking any existing group pill's "Edit group" already does (both land on the exact
+  // same #group-modal, which also still has its own persistent "New group name" + Add input at the
+  // bottom regardless of which group pill got you there — so adding a brand-new group still works,
+  // just via an existing pill's right-click menu instead of a dedicated icon). Real settings screen
+  // is a future project, not this icon's job in its current half-used state. openGroupModal() and
+  // the modal itself are untouched — only this direct entry point is gone.
   html+=selectToggleButtonHTML();
-  html+=`<button class="filter-btn grp-manage-btn" onclick="openGroupModal()" title="Manage groups"><i class="fa fa-cog"></i></button>`;
   html+='</div>';
   html+=selectActionBarHTML();
   if(allTagsUsed().length){
