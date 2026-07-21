@@ -9891,7 +9891,14 @@ function pullTaskRowHTML(t){
   const pd=pullPickerForDate();
   const selected=isAutoMember||formSubtasks.some(s=>s.refTaskId===t.id&&subtaskVisibleOnDate(s,pd));
   const safeId=t.id.replace(/'/g,"\\'");
-  const recurTag=isRecurringTask(t)&&t.done?'<i class="fa fa-refresh" style="font-size:11px;color:var(--text3);margin-right:4px" title="Recurring — done for today, resets on its next cycle"></i>':'';
+  // 2026-07-21 fix, per Brody: this used to gate on `t.done` — a recurring task's raw `.done` flag
+  // is only ever true for the ~1.2s window right after it gets checked (see toggle()'s auto-reset),
+  // so this badge basically never showed for a genuinely recurring, currently-due task (like Legs)
+  // and instead flickered on for whatever recurring task Brody happened to have clicked a second
+  // ago (Chest) — pure timing noise, not a real signal. Now matches the same plain
+  // `isRecurringTask(t)` convention every other checklist location's recurring badge uses — shows
+  // whenever the task recurs at all, regardless of its momentary checked state.
+  const recurTag=isRecurringTask(t)?'<i class="fa fa-refresh checklist-recur-badge" style="margin-right:4px" title="Recurring task"></i>':'';
   const clickAttr=`onclick="togglePullTaskPick('${safeId}',${!selected})"`;
   const title=isAutoMember?'Filed under this category, due/recurring today — click to remove from today\'s checklist (same as the x there), same as any other row here.':(selected?'Pulled in — click to send back':'Click to pull in');
   return `<div class="checklist-row checklist-row-toggle${selected?' pick-row-selected':''}" ${clickAttr} title="${title}">
