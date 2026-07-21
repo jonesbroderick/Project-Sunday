@@ -1090,7 +1090,14 @@
   .mobile-stats-mini{display:flex;gap:6px}
   .mobile-stats-mini .stat-mini{padding:4px 7px;font-size:10.5px}
   .mobile-stats-mini .stat-mini-val{font-size:12px}
-  .mobile-signout-btn{background:none;border:none;color:var(--text3);font-size:14px;padding:4px}
+  .mobile-search-btn{background:none;border:none;color:var(--text3);font-size:14px;padding:4px}
+  .mobile-search-btn.active{color:var(--blue-text)}
+  .mobile-search-bar{display:flex;align-items:center;gap:7px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:7px 10px;transition:border-color .15s}
+  .mobile-search-bar:focus-within{border-color:var(--blue-text)}
+  .mobile-search-icon{color:var(--text3);font-size:13px;flex-shrink:0}
+  .mobile-search-bar:focus-within .mobile-search-icon{color:var(--blue-text)}
+  .mobile-search-input{flex:1;min-width:0;background:transparent;border:none;color:var(--text);font-size:16px;outline:none}
+  .mobile-search-clear-btn,.mobile-search-close-btn{background:none;border:none;color:var(--text3);cursor:pointer;font-size:13px;padding:4px;flex-shrink:0}
   .mobile-daily-quote{width:100%;max-width:100%;margin:0;font-size:11.5px;padding:6px 34px 6px 10px}
   .mobile-tab-pane{display:none;flex:1;min-height:0;overflow-y:auto;padding:0 14px 90px}
   .mobile-tab-pane.active{display:block}
@@ -1116,6 +1123,7 @@
   .mobile-agenda-time{font-size:12px;color:var(--text2);margin-top:1px}
   .mobile-agenda-badge{font-size:11.5px;color:var(--text2);background:var(--bg3);border-radius:6px;padding:3px 7px;flex-shrink:0}
   .mobile-empty{color:var(--text3);font-size:13.5px;padding:30px 4px;text-align:center}
+  .mobile-search-results-label{font-size:12.5px;color:var(--text2);padding:10px 0 8px}
   /* Group + category pill nav (Tasks tab) — colored like every other group pill in the app, not a
      flat gray/blue toggle, per Brody's "the group colors are no longer in place" note. */
   .mobile-grp-pills,.mobile-cat-pills{display:flex;gap:6px;overflow-x:auto;padding:10px 0;margin-bottom:2px;-webkit-overflow-scrolling:touch}
@@ -1283,8 +1291,19 @@
           <div class="stat-mini stat-completed" onclick="setMobileTab('tasks')" title="View all tasks"><i class="fa fa-check-circle"></i><span class="stat-mini-val" id="stat-done-m">0</span><span class="stat-mini-label">done</span></div>
           <div class="stat-mini stat-overdue-box" id="stat-overdue-card-m" onclick="setMobileTab('tasks')" title="View overdue tasks"><i class="fa fa-exclamation-circle"></i><span class="stat-mini-val" id="stat-overdue-m">0</span><span class="stat-mini-label">overdue</span></div>
         </div>
-        <button type="button" class="mobile-signout-btn" onclick="handleSignOut()" title="Sign out"><i class="fa fa-sign-out"></i></button>
+        <button type="button" class="mobile-search-btn" id="mobile-search-btn" onclick="toggleMobileSearch()" title="Search tasks"><i class="fa fa-search"></i></button>
       </div>
+    </div>
+    <!-- 2026-07-22, per Brody: sign-out isn't needed day-to-day (it'll live in a real settings
+         screen later) — replaced with search here instead. Hidden until the icon above is tapped,
+         then takes over this row; reuses the exact same match logic as the desktop search box
+         (taskMatchesSearch) so "search" means the same thing everywhere, just its own compact
+         result list suited to a phone screen (see onMobileSearchInput/renderMobileTasksTab). -->
+    <div class="mobile-search-bar" id="mobile-search-bar" style="display:none">
+      <i class="fa fa-search mobile-search-icon"></i>
+      <input type="text" id="mobile-search-input" class="mobile-search-input" placeholder="Search tasks…" autocomplete="off" oninput="onMobileSearchInput()" onkeydown="mobileSearchInputKeydown(event)">
+      <button type="button" class="mobile-search-clear-btn" id="mobile-search-clear-btn" onclick="clearMobileSearch()" style="display:none" title="Clear search"><i class="fa fa-times"></i></button>
+      <button type="button" class="mobile-search-close-btn" onclick="toggleMobileSearch()" title="Close search"><i class="fa fa-chevron-up"></i></button>
     </div>
     <div class="daily-quote mobile-daily-quote" id="daily-quote-m" tabindex="0"></div>
   </div>
@@ -1900,6 +1919,7 @@ let mobileGrpFilter = 'today'; // 'today' | a real group name | UNGROUPED_GRP
 // whole script has finished loading top to bottom.
 let mobileCategoryFilter = '__uncategorized__';
 let mobileShowCompleted = false; // Tasks tab's own completed-toggle — deliberately separate from the desktop All Tasks one
+let mobileSearchQuery = ''; // live text in the mobile header's search box — mirrors desktop's searchQuery
 
 function renderMobile(){
   if(mobileActiveTab==='calendar') renderMobileCalendar();
@@ -1914,6 +1934,42 @@ function setMobileTab(tab){
   if(pane)pane.classList.add('active');
   if(btn)btn.classList.add('active');
   renderMobile();
+}
+// 2026-07-22, per Brody: replaced the mobile header's sign-out icon with search (sign-out will
+// live in a real settings screen later, not needed day-to-day). Tapping the icon reveals a search
+// bar in its place; typing switches to the Tasks tab (search results only ever show there) and
+// filters via the same taskMatchesSearch() the desktop search box uses. Closing search (the icon,
+// the chevron, or Escape) clears the query and restores whatever pill was showing before.
+function toggleMobileSearch(){
+  const bar=document.getElementById('mobile-search-bar');
+  const btn=document.getElementById('mobile-search-btn');
+  const opening=bar&&bar.style.display==='none';
+  if(bar)bar.style.display=opening?'flex':'none';
+  if(btn)btn.classList.toggle('active',opening);
+  if(opening){
+    if(mobileActiveTab!=='tasks')setMobileTab('tasks');
+    setTimeout(()=>{const inp=document.getElementById('mobile-search-input');if(inp)inp.focus();},50);
+  } else {
+    clearMobileSearch();
+  }
+}
+function onMobileSearchInput(){
+  const input=document.getElementById('mobile-search-input');
+  mobileSearchQuery=input?input.value:'';
+  const clearBtn=document.getElementById('mobile-search-clear-btn');
+  if(clearBtn)clearBtn.style.display=mobileSearchQuery?'block':'none';
+  renderMobileTasksTab();
+}
+function clearMobileSearch(){
+  mobileSearchQuery='';
+  const input=document.getElementById('mobile-search-input');
+  if(input)input.value='';
+  const clearBtn=document.getElementById('mobile-search-clear-btn');
+  if(clearBtn)clearBtn.style.display='none';
+  renderMobileTasksTab();
+}
+function mobileSearchInputKeydown(e){
+  if(e.key==='Escape'){e.target.blur();toggleMobileSearch();}
 }
 // Reuses the exact same week-paging state/functions the desktop Weekly View already has
 // (weekOffset/getWeekMonday/shiftPlannerDateByDays) so paging weeks on the phone and paging weeks
@@ -2082,6 +2138,21 @@ function mobileQuickAddTask(){
 function renderMobileTasksTab(){
   const el=document.getElementById('mobile-tab-tasks');
   if(!el)return;
+  // Search mode (2026-07-22): same idea as desktop's search box in renderAll() — a query
+  // overrides the pills/quick-add with one flat, sorted list of matches across every task, using
+  // the exact same taskMatchesSearch() the desktop search uses so "search" means the same thing
+  // everywhere. Deliberately doesn't touch mobileGrpFilter/mobileCategoryFilter, so clearing the
+  // search returns to whichever pill was selected before — search is a temporary lens, not a mode.
+  if(mobileSearchQuery.trim()){
+    const q=mobileSearchQuery.trim().toLowerCase();
+    const results=tasks.filter(t=>taskMatchesSearch(t,q)).sort(byDueTime);
+    let html=`<div class="mobile-search-results-label"><i class="fa fa-search" style="margin-right:6px"></i>${results.length} result${results.length!==1?'s':''} for "${escHtml(mobileSearchQuery.trim())}"</div>`;
+    html += results.length
+      ? results.map(t=>mobileTaskRowHTML(t,null)).join('')
+      : `<div class="mobile-empty">No tasks match "${escHtml(mobileSearchQuery.trim())}".</div>`;
+    el.innerHTML=html;
+    return;
+  }
   let pillsHTML=`<div class="mobile-grp-pills">
     <button type="button" class="mobile-grp-pill${mobileGrpFilter==='today'?' active':''}" style="${mobileGrpFilter==='today'?'background:var(--blue);border-color:var(--blue)':''}" onclick="setMobileGrpFilter('today')">Today</button>`;
   GRPS.forEach(g=>{
@@ -2118,7 +2189,7 @@ function renderMobileTasksTab(){
   }
 
   const quickAddHTML=`<div class="mobile-quick-add-row">
-    <input type="text" id="mobile-quick-add-input" class="mobile-quick-add-input" placeholder="Quick add a task…" onkeydown="mobileQuickAddKey(event)">
+    <input type="text" id="mobile-quick-add-input" class="mobile-quick-add-input" placeholder="Add a task" onkeydown="mobileQuickAddKey(event)">
     <button type="button" class="mobile-quick-add-btn" onclick="mobileQuickAddTask()">+</button>
   </div>`;
 
