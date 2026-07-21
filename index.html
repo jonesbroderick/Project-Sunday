@@ -2775,7 +2775,14 @@ function categoryCardHTML(grp,name,scheduleTask,items,doneToday,memberTasks){
   // Hoisted up from further below (used by the inline checklist rows now built just after this) —
   // scheduleTask's own real task id, safe for embedding in an onclick string.
   const scheduleTaskId=scheduleTask?scheduleTask.id.replace(/'/g,"\\'"):null;
-  const ownSubtasks=scheduleTask?(scheduleTask.subtasks||[]):[];
+  // 2026-07-21 fix, per Brody: this card (shown inline on the Today list, per-group Due Today tabs,
+  // and the "All" pill) is supposed to be the exact same checklist as the quick-view panel
+  // (renderAllCategoryDetailPanel), just styled differently — but it read scheduleTask.subtasks raw
+  // and unfiltered, the same bug already fixed there and in the Edit Task modal. No index-based
+  // handler reads position here (every row click keys off the subtask's own id, not its array
+  // index — no drag-reorder on this card, see inlineOwnRowsHTML's own comment), so this can just
+  // filter the array directly with no indexOf bookkeeping needed.
+  const ownSubtasks=scheduleTask?(scheduleTask.subtasks||[]).filter(s=>subtaskVisibleOnDate(s,tk)):[];
   const ownDoneCount=ownSubtasks.filter(s=>subtaskDoneForDate(s,tk,scheduleTask)).length;
   const doneCount=ownDoneCount+items.filter(i=>i.done).length+memberTasks.filter(t=>plannerChecked(t,tk)).length;
   const totalCount=ownSubtasks.length+items.length+memberTasks.length;
