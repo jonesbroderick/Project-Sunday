@@ -1803,6 +1803,17 @@ let cloudSyncUnsub = null; // unsubscribe function for the live Firestore listen
 // local edit. Harmless in practice (same data going back up), but pointless network chatter.
 let cloudSyncApplyingRemote = false;
 let cloudSyncDebounceTimer = null;
+// 2026-07-21 fix, per Brody's "double-click to un-toggle" repro (Arms in Gym): every write we send
+// echoes right back to us through onSnapshot below — once instantly from Firestore's local cache,
+// then again when the server actually confirms it, both firing as separate events for the exact
+// same document. If the user toggles a checklist item TWICE in quick succession (check, then
+// uncheck a second or two later), the still-in-flight echo of the FIRST write can arrive after the
+// SECOND toggle already changed things in memory, and applyCloudSyncPayload was blindly overwriting
+// `tasks` with whatever that stale payload said — silently reverting the second click right back to
+// the first click's state, so it looked like nothing happened. Tracks the `updatedAt` stamp of the
+// payload WE last sent, so an incoming snapshot that's no newer than our own last write (i.e. it's
+// just an echo of something we already know about) gets ignored instead of re-applied.
+let lastSyncedUpdatedAt = 0;
 
 function authShowError(msg){
   const el=document.getElementById('auth-error');
@@ -1860,8 +1871,13 @@ function queueCloudSync(){
   if(cloudSyncDebounceTimer)clearTimeout(cloudSyncDebounceTimer);
   cloudSyncDebounceTimer=setTimeout(function(){
     cloudSyncDebounceTimer=null;
+    const payload=collectCloudSyncPayload();
+    // Stamp this BEFORE the network call resolves — the echo guard in applyCloudSyncPayload only
+    // needs to know "this exact write is mine," which is true the instant we send it, not once the
+    // server gets around to confirming it.
+    lastSyncedUpdatedAt=payload.updatedAt;
     fbDb.collection('users').doc(cloudSyncUserId).collection('appData').doc('state')
-      .set(collectCloudSyncPayload())
+      .set(payload)
       .catch(function(err){ console.error('Cloud sync failed:',err); });
   },1200);
 }
@@ -1871,6 +1887,11 @@ function queueCloudSync(){
 // re-renders. Missing/malformed fields are left untouched rather than blanked out, so a partially
 // old document from before some field existed can never wipe out a whole category of data.
 function applyCloudSyncPayload(data){
+  // Ignore an echo of (or anything no newer than) our own last write — see lastSyncedUpdatedAt's
+  // comment above. A genuinely newer remote change (another device, or the first load after signing
+  // in) always has a strictly greater updatedAt and still gets applied normally.
+  if(data.updatedAt&&data.updatedAt<=lastSyncedUpdatedAt)return;
+  if(data.updatedAt)lastSyncedUpdatedAt=data.updatedAt;
   cloudSyncApplyingRemote=true;
   if(Array.isArray(data.tasks))tasks=data.tasks;
   if(Array.isArray(data.GRP_LIST)&&data.GRP_LIST.length){
@@ -3035,16 +3056,17 @@ function categoryCardHTML(grp,name,scheduleTask,items,doneToday,memberTasks){
     const p=subRowParts(s); p.done=subtaskDoneForDate(s,tk,scheduleTask);
     const safeSId=String(s.id).replace(/'/g,"\\'");
     const checkOnclick=`event.stopPropagation();toggleSubtaskDone('${scheduleTaskId}','${safeSId}','${tk}');renderAll3()`;
-    const rowOpenClick=s.refTaskId?` onclick="event.stopPropagation();openForm('${String(s.refTaskId).replace(/'/g,"\\'")}')"`:'';
     const linkedRt=s.refTaskId?tasks.find(x=>x.id===s.refTaskId):null;
     const rowTime=linkedRt?effectiveTimeFor(linkedRt,tk):null;
     // 2026-07-21, per Brody: uniform blue clickable link icon + recurring badge, same as everywhere else.
     const rowRecurBadge=(linkedRt&&isRecurringTask(linkedRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
-    return `<div class="card-checklist-row"${rowOpenClick} style="cursor:${s.refTaskId?'pointer':'default'}">
+    // 2026-07-21, per Brody: made consistent with every other checklist row this session — the pill
+    // itself toggles on click now; opening the task lives on the link icon specifically.
+    return `<div class="card-checklist-row" onclick="${checkOnclick}" style="cursor:pointer">
       <button type="button" class="subtask-check${p.done?' done':''}" onclick="${checkOnclick}">${p.done?'<i class="fa fa-check"></i>':''}</button>
       <span class="subtask-text${p.done?' done':''}">${escHtml(p.title)}</span>
       ${rowTimeTagHTML(rowTime)}
-      ${s.refTaskId?`<i class="fa fa-link subtask-linked-icon" title="Live-linked task — click to open"></i>${rowRecurBadge}`:''}
+      ${s.refTaskId?`<i class="fa fa-link subtask-linked-icon" onclick="event.stopPropagation();openForm('${String(s.refTaskId).replace(/'/g,"\\'")}')" title="Live-linked task — click to open"></i>${rowRecurBadge}`:''}
     </div>`;
   }).join('');
   const inlineMemberRowsHTML=memberTasks.map(mt=>{
@@ -3057,7 +3079,7 @@ function categoryCardHTML(grp,name,scheduleTask,items,doneToday,memberTasks){
     // no more grey/blue distinction; a small recurring badge next to it is the one remaining cue
     // for "auto-pulled on its own schedule."
     const recurBadge=isRecurringTask(mt)?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
-    return `<div class="card-checklist-row" style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeMtId}')">
+    return `<div class="card-checklist-row" style="cursor:pointer" onclick="event.stopPropagation();toggle('${safeMtId}')">
       <button type="button" class="subtask-check${checked?' done':''}" onclick="event.stopPropagation();toggle('${safeMtId}')">${checked?'<i class="fa fa-check"></i>':''}</button>
       <span class="subtask-text${checked?' done':''}">${escHtml(mt.title)}</span>
       ${rowTimeTagHTML(effectiveTimeFor(mt,tk))}
@@ -3723,18 +3745,13 @@ function renderAllDetailPanel(){
   // subtaskVisibleOnDate) — this quick-view always reflects "today," so a pull-in made for some
   // other day doesn't clutter it up here either.
   const subtasks=(t.subtasks||[]).filter(s=>subtaskVisibleOnDate(s,todayKey()));
-  // Same click-to-rename idiom as the full modal's own checklist (click the text, an input swaps
-  // in, Enter/blur commits, Escape cancels) — kept independent of the modal's formSubtaskEditIdx
-  // state so the two never collide. A live-linked row (refTaskId) has no local text of its own to
-  // rename here — same "missing" treatment the modal gives those.
+  // 2026-07-21, per Brody: every checklist item is a real task now — its name only ever changes from
+  // that task's own Edit Task screen, not by clicking the pill inline. Click-to-rename retired; the
+  // rest of the pill (excluding the grip, the link icon, and the ×) now toggles the item instead.
   const checklistHTML=subtasks.map((s,i)=>{
     const p=subRowParts(s);
     if(t.isCategoryBlock&&isRecurringTask(t)) p.done=subtaskDoneForDate(s,todayKey(),t);
-    const textHTML=(allDetailEditingSubtaskId===s.id)
-      ? `<input type="text" class="subtask-text-input${p.done?' done':''}" value="${escHtml(p.title)}" autofocus
-           onblur="allDetailCommitEditSubtask('${s.id}',this.value)"
-           onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}else if(event.key==='Escape'){event.preventDefault();allDetailCancelEditSubtask();}">`
-      : `<span class="subtask-text${p.done?' done':''}"${s.refTaskId?'':` onclick="allDetailStartEditSubtask('${s.id}')" title="Click to rename"`}>${escHtml(p.title)}</span>`;
+    const textHTML=`<span class="subtask-text${p.done?' done':''}">${escHtml(p.title)}</span>`;
     // 2026-07-21, per Brody: this panel used to only show a remove x for a plain typed row —
     // a linked row (refTaskId) had no way to be removed from here at all. Now every row gets the
     // same blue, clickable link icon (+ a small recurring badge when the real task recurs) AND its
@@ -3743,14 +3760,15 @@ function renderAllDetailPanel(){
     const safeLinkRefId=linkRt?String(linkRt.id).replace(/'/g,"\\'"):'';
     const linkRecurBadge=(linkRt&&isRecurringTask(linkRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
     const linkIconHTML=s.refTaskId?`<i class="fa fa-link subtask-linked-icon"${safeLinkRefId?` style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeLinkRefId}')"`:''} title="${linkRt?'Live-linked task — click to open':'Linked task was deleted'}"></i>${linkRecurBadge}`:'';
-    return `<div class="checklist-row" draggable="true"
+    return `<div class="checklist-row" draggable="true" style="cursor:pointer"
       ondragstart="allDetailChecklistDragStart(event,${i})" ondragover="allDetailChecklistDragOver(event,${i})"
-      ondragleave="allDetailChecklistDragLeave(event)" ondrop="allDetailChecklistDrop(event,${i})" ondragend="allDetailChecklistDragEnd(event)">
-      <i class="fa fa-bars checklist-grip" title="Drag to reorder"></i>
-      <button type="button" class="subtask-check${p.done?' done':''}" onclick="allDetailToggleChecklistItem('${s.id}')">${p.done?'<i class="fa fa-check"></i>':''}</button>
+      ondragleave="allDetailChecklistDragLeave(event)" ondrop="allDetailChecklistDrop(event,${i})" ondragend="allDetailChecklistDragEnd(event)"
+      onclick="allDetailToggleChecklistItem('${s.id}')">
+      <i class="fa fa-bars checklist-grip" title="Drag to reorder" onclick="event.stopPropagation()"></i>
+      <button type="button" class="subtask-check${p.done?' done':''}" onclick="event.stopPropagation();allDetailToggleChecklistItem('${s.id}')">${p.done?'<i class="fa fa-check"></i>':''}</button>
       ${textHTML}
       ${linkIconHTML}
-      <button type="button" class="subtask-remove" title="Remove" onclick="allDetailRemoveChecklistItem('${s.id}')">&times;</button>
+      <button type="button" class="subtask-remove" title="Remove" onclick="event.stopPropagation();allDetailRemoveChecklistItem('${s.id}')">&times;</button>
     </div>`;
   }).join('') + (t.scheduledTime?allDetailTimeBlockPoolRowsHTML(t.id):'');
   contentEl.innerHTML=`
@@ -3830,14 +3848,16 @@ function renderAllCategoryDetailPanel(emptyEl,contentEl){
     const safeLinkRefId=linkRt?String(linkRt.id).replace(/'/g,"\\'"):'';
     const linkRecurBadge=(linkRt&&isRecurringTask(linkRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
     const linkIconHTML=s.refTaskId?`<i class="fa fa-link subtask-linked-icon"${safeLinkRefId?` style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeLinkRefId}')"`:''} title="${linkRt?'Live-linked task — click to open':'Linked task was deleted'}"></i>${linkRecurBadge}`:'';
-    return `<div class="checklist-row" draggable="true"
+    const rowToggle=`toggleSubtaskDone('${scheduleTask.id}','${s.id}');renderAllDetailPanel();renderAll()`;
+    return `<div class="checklist-row" draggable="true" style="cursor:pointer"
       ondragstart="allCategoryDetailChecklistDragStart(event,${i})" ondragover="allCategoryDetailChecklistDragOver(event,${i})"
-      ondragleave="allCategoryDetailChecklistDragLeave(event)" ondrop="allCategoryDetailChecklistDrop(event,${i})" ondragend="allCategoryDetailChecklistDragEnd(event)">
-      <i class="fa fa-bars checklist-grip" title="Drag to reorder"></i>
-      <button type="button" class="subtask-check${p.done?' done':''}" onclick="toggleSubtaskDone('${scheduleTask.id}','${s.id}');renderAllDetailPanel();renderAll()">${p.done?'<i class="fa fa-check"></i>':''}</button>
+      ondragleave="allCategoryDetailChecklistDragLeave(event)" ondrop="allCategoryDetailChecklistDrop(event,${i})" ondragend="allCategoryDetailChecklistDragEnd(event)"
+      onclick="${rowToggle}">
+      <i class="fa fa-bars checklist-grip" title="Drag to reorder" onclick="event.stopPropagation()"></i>
+      <button type="button" class="subtask-check${p.done?' done':''}" onclick="event.stopPropagation();${rowToggle}">${p.done?'<i class="fa fa-check"></i>':''}</button>
       <span class="subtask-text${p.done?' done':''}">${escHtml(p.title)}</span>
       ${linkIconHTML}
-      <button type="button" class="subtask-remove" title="Remove" onclick="allCategoryDetailRemoveSubtask('${s.id}')">&times;</button>
+      <button type="button" class="subtask-remove" title="Remove" onclick="event.stopPropagation();allCategoryDetailRemoveSubtask('${s.id}')">&times;</button>
     </div>`;
   }).join('');
   const poolRows=poolDayItemsForDate(grp,name,todayKey());
@@ -3868,12 +3888,13 @@ function renderAllCategoryDetailPanel(emptyEl,contentEl){
     // grey vs. blue is retired in favor of a uniform blue, clickable link icon everywhere, with a
     // small recurring badge alongside it when the real task actually recurs.
     const recurBadge=isRecurringTask(t)?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
-    return `<div class="checklist-row" title="Task filed under this category">
-      <button type="button" class="subtask-check${checked?' done':''}" onclick="toggle('${safeId}');renderAllDetailPanel();renderAll()">${checked?'<i class="fa fa-check"></i>':''}</button>
-      <span class="subtask-text${checked?' done':''}" style="cursor:pointer" onclick="selectAllTaskDetail('${safeId}')">${escHtml(t.title)}</span>
+    const rowToggle=`toggle('${safeId}');renderAllDetailPanel();renderAll()`;
+    return `<div class="checklist-row" style="cursor:pointer" title="Task filed under this category" onclick="${rowToggle}">
+      <button type="button" class="subtask-check${checked?' done':''}" onclick="event.stopPropagation();${rowToggle}">${checked?'<i class="fa fa-check"></i>':''}</button>
+      <span class="subtask-text${checked?' done':''}">${escHtml(t.title)}</span>
       ${dupTag}
       <i class="fa fa-link subtask-linked-icon" onclick="event.stopPropagation();openForm('${safeId}')" title="Filed under this category — click to open"></i>${recurBadge}
-      <button type="button" class="subtask-remove" title="Remove from today's checklist — never deletes the task itself" onclick="removeAutoMemberFromToday('${safeId}',todayKey());renderAllDetailPanel();renderAll()">&times;</button>
+      <button type="button" class="subtask-remove" title="Remove from today's checklist — never deletes the task itself" onclick="event.stopPropagation();removeAutoMemberFromToday('${safeId}',todayKey());renderAllDetailPanel();renderAll()">&times;</button>
     </div>`;
   }).join('');
   const checklistHTML=ownRowsHTML+memberRowsHTML+poolRowsHTML;
@@ -4917,15 +4938,17 @@ function taskCardHTML(t,showDate,compact,dateKey,tintByGroup,focusDraggable){
       const ownRowsHTML=subtasks.map(s=>{
         const p=subRowParts(s); p.done=subtaskDoneForDate(s,dk,t);
         const safeSId=String(s.id).replace(/'/g,"\\'");
-        const rowOpenClick=s.refTaskId?` onclick="event.stopPropagation();openForm('${String(s.refTaskId).replace(/'/g,"\\'")}')"`:'';
+        const rowToggleClick=`event.stopPropagation();toggleSubtaskDone('${t.id}','${safeSId}','${dk}');renderAll3()`;
         const linkedRt=s.refTaskId?tasks.find(x=>x.id===s.refTaskId):null;
         const rowTime=linkedRt?effectiveTimeFor(linkedRt,dk):null;
         const wkRecurBadge=(linkedRt&&isRecurringTask(linkedRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
-        return `<div class="card-checklist-row"${rowOpenClick} style="cursor:${s.refTaskId?'pointer':'default'}">
-          <button type="button" class="subtask-check${p.done?' done':''}" onclick="event.stopPropagation();toggleSubtaskDone('${t.id}','${safeSId}','${dk}');renderAll3()">${p.done?'<i class="fa fa-check"></i>':''}</button>
+        // 2026-07-21, per Brody: made consistent with every other checklist row this session — the
+        // pill toggles on click now; opening the task lives on the link icon specifically.
+        return `<div class="card-checklist-row" onclick="${rowToggleClick}" style="cursor:pointer">
+          <button type="button" class="subtask-check${p.done?' done':''}" onclick="${rowToggleClick}">${p.done?'<i class="fa fa-check"></i>':''}</button>
           <span class="subtask-text${p.done?' done':''}">${escHtml(p.title)}</span>
           ${rowTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(rowTime)}</span>`:''}
-          ${s.refTaskId?`<i class="fa fa-link subtask-linked-icon" title="Live-linked task — click to open"></i>${wkRecurBadge}`:''}
+          ${s.refTaskId?`<i class="fa fa-link subtask-linked-icon" onclick="event.stopPropagation();openForm('${String(s.refTaskId).replace(/'/g,"\\'")}')" title="Live-linked task — click to open"></i>${wkRecurBadge}`:''}
         </div>`;
       }).join('');
       const memberRowsHTML=isCategory?categoryAutoMemberTasksForBlock(t,dk).map(mt=>{
@@ -4936,7 +4959,7 @@ function taskCardHTML(t,showDate,compact,dateKey,tintByGroup,focusDraggable){
         // scoped to dk (this specific Weekly View day), not always today, since this card can
         // render any day of the week, not just today.
         const wkMemberRecurBadge=isRecurringTask(mt)?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
-        return `<div class="card-checklist-row" style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeMtId}')">
+        return `<div class="card-checklist-row" style="cursor:pointer" onclick="event.stopPropagation();toggle('${safeMtId}')">
           <button type="button" class="subtask-check${checked?' done':''}" onclick="event.stopPropagation();toggle('${safeMtId}')">${checked?'<i class="fa fa-check"></i>':''}</button>
           <span class="subtask-text${checked?' done':''}">${escHtml(mt.title)}</span>
           ${mtTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(mtTime)}</span>`:''}
@@ -8392,7 +8415,9 @@ function virtualCategoryTrayCardHTML(group,name,members,poolItems,dateKey){
     // 2026-07-21, per Brody: same uniform blue, clickable link icon + recurring badge as every
     // other checklist row — this card never had a link icon at all before.
     const recurBadge=isRecurringTask(mt)?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
-    return `<div class="sidebar-task sidebar-subtask${checked?' done-task':''}" style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeId}')">
+    // 2026-07-21, per Brody: made consistent with every other checklist row this session — the
+    // pill toggles on click now; opening the task lives on the link icon specifically.
+    return `<div class="sidebar-task sidebar-subtask${checked?' done-task':''}" style="cursor:pointer" onclick="event.stopPropagation();toggle('${safeId}')">
       <button class="check-btn ${checked?'done':''}" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();toggle('${safeId}')">${checked?'<i class="fa fa-check"></i>':''}</button>
       <div class="sidebar-task-body"><div class="sidebar-task-title${checked?' done':''}">${escHtml(mt.title)}${timeTagHTML}<i class="fa fa-link subtask-linked-icon" onclick="event.stopPropagation();openForm('${safeId}')" title="Filed under this category — click to open"></i>${recurBadge}</div></div>
       <button class="sidebar-delete" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();removeAutoMemberFromToday('${safeId}','${dateKey}');renderPlanner();renderAll3()" title="Remove from today's checklist — never deletes the task itself">×</button>
@@ -8939,7 +8964,9 @@ function renderPlanner(){
         // it against today).
         if(plain){
           const plainChecked=subtaskDoneForDate(s,plannerDate,t);
-          html+=`<div class="sidebar-task sidebar-subtask ${plainChecked?'done-task':''}">
+          // 2026-07-21, per Brody: made consistent with every other checklist row this session —
+          // the rest of the pill toggles on click too, not just the checkbox itself.
+          html+=`<div class="sidebar-task sidebar-subtask ${plainChecked?'done-task':''}" style="cursor:pointer" onclick="toggleSubtaskDone('${safeHostId}','${safeRowId}','${plannerDate}')">
             <button class="check-btn ${plainChecked?'done':''}"
               onmousedown="event.stopPropagation()"
               onclick="event.stopPropagation();toggleSubtaskDone('${safeHostId}','${safeRowId}','${plannerDate}')">${plainChecked?'<i class="fa fa-check"></i>':''}</button>
@@ -8961,7 +8988,9 @@ function renderPlanner(){
         // alongside it when the real task actually recurs.
         const childRecurBadge=isRecurringTask(rt)?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
         const childLinkIcon=`<i class="fa fa-link subtask-linked-icon" onclick="event.stopPropagation();openForm('${safeRtId}')" title="${auto?'Filed under this category — click to open':'Live-linked task — click to open'}"></i>${childRecurBadge}`;
-        html+=`<div class="sidebar-task sidebar-subtask ${rtChecked?'done-task':''}" onmousedown="initTrayDrag(event,'${rt.id}',this,'sidebar-ghost')">
+        // 2026-07-21, per Brody: made consistent with every other checklist row this session — the
+        // rest of the pill toggles on click too, not just the checkbox itself.
+        html+=`<div class="sidebar-task sidebar-subtask ${rtChecked?'done-task':''}" style="cursor:pointer" onmousedown="initTrayDrag(event,'${rt.id}',this,'sidebar-ghost')" onclick="${childCheckOnclick}">
           <button class="check-btn ${rtChecked?'done':''}"
             onmousedown="event.stopPropagation()"
             onclick="event.stopPropagation();${childCheckOnclick}">${rtChecked?'<i class="fa fa-check"></i>':''}</button>
@@ -10787,11 +10816,14 @@ function renderFormSubtasks(){
       // regardless of auto/manual — the grey vs. blue distinction is retired in favor of a small
       // recurring badge shown only when the real task behind the row actually recurs.
       const recurBadge=isRecurringTask(mt)?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
-      return `<div class="checklist-row" style="cursor:pointer" title="Filed under this category — click to open, due or recurring today; drag to reorder" draggable="true"
+      // 2026-07-21, per Brody: made consistent with every other checklist row this session — the
+      // pill itself now toggles on click (excluding the grip, the link icon, and the ×); opening the
+      // task moved onto the link icon specifically, instead of the whole row.
+      return `<div class="checklist-row" style="cursor:pointer" title="Due or recurring today — click to toggle, drag to reorder" draggable="true"
         ondragstart="autoMemberDragStart(event,${i})" ondragover="autoMemberDragOver(event,${i})"
         ondragleave="autoMemberDragLeave(event)" ondrop="autoMemberDrop(event,${i})" ondragend="autoMemberDragEnd(event)"
-        onclick="openForm('${safeId}')">
-        <i class="fa fa-link subtask-linked-icon" title="Live-linked task — drag to reorder, click to open"></i>${recurBadge}
+        onclick="toggleFormAutoMember('${safeId}')">
+        <i class="fa fa-link subtask-linked-icon" onclick="event.stopPropagation();openForm('${safeId}')" title="Live-linked task — click to open"></i>${recurBadge}
         <button type="button" class="subtask-check ${done?'done':''}" onclick="event.stopPropagation();toggleFormAutoMember('${safeId}')">${done?'<i class="fa fa-check"></i>':''}</button>
         <span class="subtask-text ${done?'done':''}">${escHtml(mt.title)}</span>
         ${mtTimeTag}
@@ -10827,30 +10859,29 @@ function renderFormSubtasks(){
     const linkRecurBadge=(linkRt&&isRecurringTask(linkRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
     const linkIcon=s.refTaskId?`<i class="fa fa-link subtask-linked-icon"${safeRefId?` style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeRefId}')"`:''} title="${p.missing?'Linked task was deleted':'Live-linked to &quot;'+escHtml(p.title)+'&quot; — click to open it, checking this completes that task too, wherever it lives'}"></i>${linkRecurBadge}`:'';
     // Plain rows only — a referenced row is already a real task, nothing to convert.
-    const convertBtn=s.refTaskId?'':`<button type="button" class="subtask-convert" onclick="convertFormSubtaskToTask(${i})" title="Turn into its own task"><i class="fa fa-share-square"></i></button>`;
-    // A deleted-link row has no real text behind it to edit — leave it as plain (italic) text.
-    // Everything else — a plain checklist item, or a still-live link to a pulled-in task — can be
-    // clicked to rename in place. Renaming a linked row renames the actual task it points to.
-    const textHTML = (formSubtaskEditIdx===i)
-      ? `<input type="text" class="subtask-text-input ${p.done?'done':''}" id="form-subtask-edit-input" value="${escHtml(p.title)}"
-           onblur="commitFormSubtaskEdit(${i},this.value)"
-           onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}else if(event.key==='Escape'){event.preventDefault();cancelFormSubtaskEdit();}">`
-      : `<span class="subtask-text ${p.done?'done':''}"${p.missing?'':` onclick="event.stopPropagation();startEditFormSubtask(${i})" title="Click to rename"`}>${escHtml(p.title)}</span>`;
+    const convertBtn=s.refTaskId?'':`<button type="button" class="subtask-convert" onclick="event.stopPropagation();convertFormSubtaskToTask(${i})" title="Turn into its own task"><i class="fa fa-share-square"></i></button>`;
+    // 2026-07-21, per Brody: every checklist item is a real task now (see createOneOffChecklistTask)
+    // — its name should only ever change from that task's own Edit Task screen, not by clicking the
+    // pill inline. Click-to-rename is retired; the text is now just a plain label, and clicking
+    // anywhere on the row (other than the grip, the link icon, or the × ) toggles the item instead,
+    // same as clicking the checkbox does.
+    const textHTML = `<span class="subtask-text ${p.done?'done':''}">${escHtml(p.title)}</span>`;
     // 2026-07-15, per Brody: show a live-linked row's own time next to its title here too, same as
     // everywhere else this checklist item can appear.
     const linkedRt=(s.refTaskId&&!p.missing)?tasks.find(x=>x.id===s.refTaskId):null;
     const linkedTime=linkedRt?effectiveTimeFor(linkedRt,todayKey()):null;
     const rowTimeTag=linkedTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(linkedTime)}</span>`:'';
-    return `<div class="checklist-row${p.missing?' ref-missing':''}" draggable="true"
+    return `<div class="checklist-row${p.missing?' ref-missing':''}" draggable="true" style="cursor:pointer"
     ondragstart="checklistDragStart(event,${i})" ondragover="checklistDragOver(event,${i})"
-    ondragleave="checklistDragLeave(event)" ondrop="checklistDrop(event,${i})" ondragend="checklistDragEnd(event)">
-    <i class="fa fa-bars checklist-grip" title="Drag to reorder"></i>
-    <button type="button" class="subtask-check ${p.done?'done':''}" onclick="toggleFormSubtask(${i})">${p.done?'<i class="fa fa-check"></i>':''}</button>
+    ondragleave="checklistDragLeave(event)" ondrop="checklistDrop(event,${i})" ondragend="checklistDragEnd(event)"
+    onclick="toggleFormSubtask(${i})">
+    <i class="fa fa-bars checklist-grip" title="Drag to reorder" onclick="event.stopPropagation()"></i>
+    <button type="button" class="subtask-check ${p.done?'done':''}" onclick="event.stopPropagation();toggleFormSubtask(${i})">${p.done?'<i class="fa fa-check"></i>':''}</button>
     ${textHTML}
     ${rowTimeTag}
     ${linkIcon}
     ${convertBtn}
-    <button type="button" class="subtask-remove" onclick="removeFormSubtask(${i})" title="Remove">×</button>
+    <button type="button" class="subtask-remove" onclick="event.stopPropagation();removeFormSubtask(${i})" title="Remove">×</button>
   </div>`;
   }).join('') + autoMemberRowsHTML + formTimeBlockPoolRowsHTML();
   if(formSubtaskEditIdx!==null){
