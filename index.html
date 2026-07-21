@@ -9405,9 +9405,17 @@ function subtaskVisibleOnDate(s,dateKey){
   }
   const rt=tasks.find(x=>x.id===s.refTaskId);
   if(!rt)return true; // dangling/missing link — let the missing-state UI and sweeps handle it, don't hide it
+  // 2026-07-21 fix, per Brody: "regardless of whether tasks are locked, recurring, etc., I should be
+  // able to pull in and move out tasks of checklists any time." An explicit pull stamped for THIS
+  // exact day now always wins, checked before the recurring-pattern check below — previously a
+  // recurring task's visibility was decided ENTIRELY by recurrenceMatchesDate, so manually re-pulling
+  // it (via the "Pull in an existing task" picker) on a day its own pattern doesn't match silently
+  // did nothing: the row existed but stayed invisible no matter what. The automatic pattern-based
+  // check is now only the fallback for days without a deliberate same-day pull.
+  if(s.pulledDate===dateKey)return true;
   if(isRecurringTask(rt))return recurrenceMatchesDate(rt,dateKey); // recurring pull — shows on its own matching days, exactly as Brody wants
   if(!s.pulledDate)return true; // predates this field (or a manual promote-to-task link) — conservative, leave visible
-  return s.pulledDate===dateKey; // one-off pull — only on the day it was actually pulled in for
+  return false; // one-off pull whose pulledDate has passed — already covered by the check above otherwise
 }
 // 2026-07-16, per Brody: "by default, all checklist items should be real tasks. When I manually
 // type something into a checklist, it should automatically be created as a one off, non locked,
@@ -9677,13 +9685,28 @@ function togglePullPickerGrp(grp){
 // 2026-07-10, per Brody: "checked" here now means "actually pulled in right now" (reads
 // formSubtasks directly), not a pending selection waiting on a "Pull selected" button — see
 // togglePullTaskPick, which commits immediately either way.
+// Which date this picker's pulls should be scoped to — the task-being-edited's own due date if it
+// has one (planning ahead onto a future day's checklist), otherwise today. Same fallback
+// togglePullTaskPick already used inline; hoisted out so the "selected" check below can share it.
+function pullPickerForDate(){
+  const dueEl=document.getElementById('f-due');
+  return (dueEl&&dueEl.value)?dueEl.value:todayKey();
+}
 function pullTaskRowHTML(t){
   // 2026-07-16 fix: an auto-member of the category block being edited is already showing in this
   // checklist on its own (see currentEditAutoMemberIds above) — treat it as permanently selected,
   // not toggleable here, so it can't get a second real link pulled on top of itself. Clicking it
   // opens the task instead, same as its auto-member row in the checklist itself already does.
   const isAutoMember=pullPickerAutoMemberIds.has(t.id);
-  const selected=isAutoMember||formSubtasks.some(s=>s.refTaskId===t.id);
+  // 2026-07-21 fix, per Brody: this used to check raw existence in formSubtasks — true the moment
+  // ANY link row for this task existed, even a dormant one whose day had already passed (a
+  // non-recurring pull from an earlier day) or a recurring task whose own pattern doesn't match
+  // today. That made locked/recurring tasks show as "already pulled in" here even when the actual
+  // checklist (visible in the form right behind this picker) didn't show them at all. Now checks
+  // the same subtaskVisibleOnDate the checklist itself renders through, so this pill's checked state
+  // always matches reality.
+  const pd=pullPickerForDate();
+  const selected=isAutoMember||formSubtasks.some(s=>s.refTaskId===t.id&&subtaskVisibleOnDate(s,pd));
   const safeId=t.id.replace(/'/g,"\\'");
   const recurTag=isRecurringTask(t)&&t.done?'<i class="fa fa-refresh" style="font-size:11px;color:var(--text3);margin-right:4px" title="Recurring — done for today, resets on its next cycle"></i>':'';
   const clickAttr=isAutoMember?`onclick="openForm('${safeId}')"`:`onclick="togglePullTaskPick('${safeId}',${!selected})"`;
@@ -9797,16 +9820,25 @@ function togglePullTaskPick(id,checked){
   if(checked){
     if(id===editId)return;
     if(currentEditAutoMemberIds().has(id))return; // already showing as an auto-member row — nothing to pull
-    if(!formSubtasks.some(s=>s.refTaskId===id)){
-      // 2026-07-14, per Brody: stamp the pull with whichever day this task-being-edited is actually
-      // FOR (its own due-date field, live in the form) rather than always "today" — pulling a task
-      // into, say, Wednesday's Calls checklist while editing that Wednesday block should scope the
-      // pull to Wednesday, not silently to today (see subtaskVisibleOnDate above). Falls back to
-      // today for a brand-new task with no due date set yet.
-      const dueEl=document.getElementById('f-due');
-      const forDate=(dueEl&&dueEl.value)?dueEl.value:todayKey();
-      formSubtasks.push({id:'ref-'+id+'-'+Date.now().toString(36),refTaskId:id,pulledDate:forDate});
-    }
+    // 2026-07-14, per Brody: stamp the pull with whichever day this task-being-edited is actually
+    // FOR (its own due-date field, live in the form) rather than always "today" — pulling a task
+    // into, say, Wednesday's Calls checklist while editing that Wednesday block should scope the
+    // pull to Wednesday, not silently to today (see subtaskVisibleOnDate above). Falls back to
+    // today for a brand-new task with no due date set yet.
+    const forDate=pullPickerForDate();
+    // 2026-07-21 fix, per Brody: "regardless of whether tasks are locked, recurring, etc., I should
+    // be able to pull in and move out tasks of checklists any time." This used to only push a fresh
+    // row if NO row existed for this task at all — so re-pulling a task that already had a dormant
+    // link (an old one-off pull whose day had passed, or a recurring task whose own pattern doesn't
+    // match today) silently did nothing, since a row technically already existed even though it
+    // wasn't visible. Now always ends up with exactly one fresh, visible-for-forDate link: strip any
+    // existing row for this task, both here and in every other checklist it might be sitting in
+    // (unlinkTaskFromAllChecklists — same "a task only ever lives in one checklist at a time" move
+    // semantics the calendar's drag-and-drop pull-in, pullTaskIntoCategoryBlock, already uses), then
+    // push a brand new row stamped for forDate.
+    formSubtasks=formSubtasks.filter(s=>s.refTaskId!==id);
+    unlinkTaskFromAllChecklists(id);
+    formSubtasks.push({id:'ref-'+id+'-'+Date.now().toString(36),refTaskId:id,pulledDate:forDate});
   } else {
     formSubtasks=formSubtasks.filter(s=>s.refTaskId!==id);
   }
