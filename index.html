@@ -1143,15 +1143,26 @@
   .mobile-quick-add-row{display:flex;gap:8px;margin:10px 0 12px}
   .mobile-quick-add-input{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-size:15px}
   .mobile-quick-add-btn{background:var(--blue);color:#fff;border:none;border-radius:8px;padding:0 16px;font-size:20px;font-weight:600}
-  .mobile-task-row{display:flex;align-items:center;gap:10px;background:var(--bg2);border-left:3px solid var(--border);border-radius:8px;padding:11px 12px;margin-bottom:7px;cursor:pointer}
+  .mobile-task-row-wrap{margin-bottom:7px}
+  .mobile-task-row{display:flex;align-items:center;gap:10px;background:var(--bg2);border-left:3px solid var(--border);border-radius:8px;padding:11px 12px;cursor:pointer}
   .mobile-task-row.done{opacity:.55}
   .mobile-task-row.selected{background:var(--blue-bg)}
   .mobile-agenda-check.selected{border-color:var(--blue-text);background:var(--blue-text);color:#0c0c0c}
   .mobile-select-btn{flex-shrink:0;width:34px;height:34px;border-radius:50%;border:1px solid var(--border);background:var(--bg2);color:var(--text2);font-size:14px}
   .mobile-select-btn.active{background:var(--blue-text);border-color:var(--blue-text);color:#0c0c0c}
-  .mobile-task-meta{display:flex;gap:8px;align-items:center;margin-top:2px}
+  .mobile-task-meta{display:flex;gap:8px;align-items:center;margin-top:2px;flex-wrap:wrap}
   .mobile-task-due{font-size:11.5px;color:var(--amber-text)}
   .mobile-task-cat{font-size:11.5px;font-weight:600}
+  /* 2026-07-22, per Brody: a category on Dolo's Today list used to look exactly like a plain task —
+     no way to tell it even HAD a checklist without tapping in. Same three cues Blanc's category
+     cards show: a recurring icon next to the title, a done/total ticker in the meta row, and (new
+     here — Blanc's Due Today card relies on its side quick-view panel instead, which doesn't exist
+     on a phone) a chevron that expands the checklist right in place. */
+  .mobile-recur-icon{font-size:11px;color:var(--text3);margin-left:6px}
+  .mobile-checklist-ticker{font-size:11.5px;color:var(--text2);background:var(--bg3);border-radius:8px;padding:1px 7px}
+  .mobile-expand-btn{flex-shrink:0;width:30px;height:30px;border-radius:50%;border:none;background:none;color:var(--text3);font-size:13px;display:flex;align-items:center;justify-content:center}
+  .mobile-checklist-expand{background:var(--bg3);border-radius:0 0 8px 8px;padding:4px 12px 8px 25px;margin-top:-1px}
+  .mobile-checklist-expand .card-checklist-row{padding:6px 0}
   .mobile-show-completed-btn{display:block;width:100%;text-align:center;padding:12px;color:var(--text2);font-size:13px;background:none;border:none}
   .mobile-nav{display:flex;flex-shrink:0;border-top:1px solid var(--border);background:var(--bg2)}
   .mobile-nav-btn{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:9px 0 calc(9px + env(safe-area-inset-bottom,0px));background:none;border:none;color:var(--text3);font-size:11px}
@@ -2341,6 +2352,21 @@ function renderMobileTasksTab(){
 // effectiveTimeFor for that specific day, same lookup the calendar blocks and desktop cards use, so
 // a one-day-only drag-override time shows correctly; every other filter falls back to the task's
 // own permanent scheduledTime, since those rows aren't tied to one specific day.
+// 2026-07-22, per Brody: on Blanc a category (recurring or not) reads as a category at a glance —
+// a recurring icon, a done/total checklist count, and (on the Categories-grouping view —
+// categoryBlockHTML) a chevron to expand/collapse its checklist right there. Dolo's Today list was
+// rendering a category exactly like a plain task, "no clue if there's even checklist items under
+// it unless you click into it." mobileExpandedCategories/toggleMobileCategoryExpand below are the
+// mobile equivalent of expandedCategories/toggleCategoryCollapse; the recurring icon and checklist
+// ticker use isRecurringTask()/taskChecklistTotals() exactly as-is, no separate mobile math, so a
+// category always reads the same total whether it's this row, the full card, or the Day Planner —
+// same principle taskChecklistTotals' own comment already states.
+let mobileExpandedCategories=new Set();
+function toggleMobileCategoryExpand(id){
+  if(mobileExpandedCategories.has(id))mobileExpandedCategories.delete(id);
+  else mobileExpandedCategories.add(id);
+  renderMobile();
+}
 function mobileTaskRowHTML(t,dateKey){
   const cc=GRP_COLORS[t.group]||'#888';
   const safeId=t.id.replace(/'/g,"\\'");
@@ -2357,16 +2383,49 @@ function mobileTaskRowHTML(t,dateKey){
   const checkHTML=selectMode
     ?`<button type="button" class="mobile-agenda-check${isSelected?' selected':''}" onclick="event.stopPropagation();toggleAllTasksSelection('${safeId}')">${isSelected?'<i class="fa fa-check"></i>':''}</button>`
     :`<button type="button" class="mobile-agenda-check${t.done?' done':''}" onclick="event.stopPropagation();toggle('${safeId}')">${t.done?'<i class="fa fa-check"></i>':''}</button>`;
-  return `<div class="mobile-task-row${t.done?' done':''}${isSelected?' selected':''}" style="border-left-color:${cc}" onclick="${rowClick}">
-    ${checkHTML}
-    <div class="mobile-agenda-main">
-      <div class="mobile-agenda-title${t.done?' done':''}">${grpIconTag(t.group)}${escHtml(t.title)}</div>
-      <div class="mobile-task-meta">
-        ${t.category?`<span class="mobile-task-cat" style="color:${cc}">${escHtml(t.category)}</span>`:''}
-        ${timeStr?`<span class="mobile-task-due">${escHtml(timeStr)}</span>`:''}
-        ${dueStr?`<span class="mobile-task-due">${escHtml(dueStr)}</span>`:''}
+  const recurIconHTML=isRecurringTask(t)?'<i class="fa fa-refresh mobile-recur-icon" title="Recurring"></i>':'';
+  const dk=dateKey||t.due||todayKey();
+  const totals=taskChecklistTotals(t,dk);
+  const tickerHTML=totals.total?`<span class="mobile-checklist-ticker">${totals.done}/${totals.total}</span>`:'';
+  const isExpanded=mobileExpandedCategories.has(t.id);
+  const expandBtnHTML=totals.total?`<button type="button" class="mobile-expand-btn" onclick="event.stopPropagation();toggleMobileCategoryExpand('${safeId}')" title="${isExpanded?'Collapse':'Expand'} checklist"><i class="fa fa-chevron-${isExpanded?'down':'right'}"></i></button>`:'';
+  let checklistHTML='';
+  if(totals.total&&isExpanded){
+    const ownSubtasks=(t.subtasks||[]).filter(s=>subtaskVisibleOnDate(s,dk));
+    const ownRowsHTML=ownSubtasks.map(s=>{
+      const p=subRowParts(s); p.done=subtaskDoneForDate(s,dk,t);
+      const safeSId=String(s.id).replace(/'/g,"\\'");
+      return `<div class="card-checklist-row" onclick="event.stopPropagation();toggleSubtaskDone('${safeId}','${safeSId}','${dk}');renderAll3()">
+        <button type="button" class="subtask-check${p.done?' done':''}">${p.done?'<i class="fa fa-check"></i>':''}</button>
+        <span class="subtask-text${p.done?' done':''}">${escHtml(p.title)}</span>
+      </div>`;
+    }).join('');
+    const autoMembers=categoryAutoMemberTasksForBlock(t,dk);
+    const memberRowsHTML=autoMembers.map(mt=>{
+      const checked=plannerChecked(mt,dk);
+      const safeMtId=mt.id.replace(/'/g,"\\'");
+      return `<div class="card-checklist-row" onclick="event.stopPropagation();toggle('${safeMtId}')">
+        <button type="button" class="subtask-check${checked?' done':''}">${checked?'<i class="fa fa-check"></i>':''}</button>
+        <span class="subtask-text${checked?' done':''}">${escHtml(mt.title)}</span>
+      </div>`;
+    }).join('');
+    checklistHTML=`<div class="mobile-checklist-expand" onclick="event.stopPropagation()">${ownRowsHTML}${memberRowsHTML}</div>`;
+  }
+  return `<div class="mobile-task-row-wrap">
+    <div class="mobile-task-row${t.done?' done':''}${isSelected?' selected':''}" style="border-left-color:${cc}" onclick="${rowClick}">
+      ${checkHTML}
+      <div class="mobile-agenda-main">
+        <div class="mobile-agenda-title${t.done?' done':''}">${grpIconTag(t.group)}${escHtml(t.title)}${recurIconHTML}</div>
+        <div class="mobile-task-meta">
+          ${t.category?`<span class="mobile-task-cat" style="color:${cc}">${escHtml(t.category)}</span>`:''}
+          ${timeStr?`<span class="mobile-task-due">${escHtml(timeStr)}</span>`:''}
+          ${dueStr?`<span class="mobile-task-due">${escHtml(dueStr)}</span>`:''}
+          ${tickerHTML}
+        </div>
       </div>
+      ${expandBtnHTML}
     </div>
+    ${checklistHTML}
   </div>`;
 }
 
@@ -4643,8 +4702,15 @@ function handleTodayQuickAddKey(event){
   const input=document.getElementById('today-quick-add-input');
   const title=(input?input.value:'').trim();
   if(!title)return;
+  // 2026-07-22: two small hardening tweaks while investigating Brody's "typing a task duplicates
+  // it" report — neither is a confirmed fix (couldn't reproduce from code alone), just closing off
+  // theoretical gaps found while reading this function: (1) id now matches Dolo's own quick-add
+  // pattern (timestamp + random suffix) instead of a bare timestamp, so two adds in the same
+  // millisecond can never collide into the same id; (2) input.value is explicitly cleared right
+  // after pushing, rather than relying on the full re-render to replace the input element with a
+  // blank one.
   tasks.push({
-    id:Date.now().toString(),
+    id:Date.now().toString()+Math.random().toString(36).slice(2,6),
     title,
     note:'',
     starred:false,
@@ -4661,6 +4727,7 @@ function handleTodayQuickAddKey(event){
     completedDates:[],
     createdAt:Date.now()
   });
+  if(input)input.value='';
   save();
   renderAll3();
   const fresh=document.getElementById('today-quick-add-input');
