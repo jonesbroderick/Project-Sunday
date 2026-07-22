@@ -1902,6 +1902,14 @@ function applyCloudSyncPayload(data){
   if(data.updatedAt)lastSyncedUpdatedAt=data.updatedAt;
   cloudSyncApplyingRemote=true;
   if(Array.isArray(data.tasks))tasks=data.tasks;
+  // 2026-07-22 fix, per Brody: an incoming cloud snapshot can be older than the last local-data
+  // migration that ran at page load (e.g. it was saved from a session before that migration even
+  // existed) — this used to silently overwrite the freshly-migrated `tasks` with the same stale data
+  // it just fixed, seconds after fixing it, since a fresh page load's lastSyncedUpdatedAt starts at 0
+  // and lets any incoming snapshot straight through. Re-running the (idempotent) migration on
+  // whatever just came down from the cloud closes that gap regardless of which copy actually won the
+  // race.
+  migrateLegacyDatelessPlainRows();
   if(Array.isArray(data.GRP_LIST)&&data.GRP_LIST.length){
     GRP_LIST=data.GRP_LIST;
     GRPS=GRP_LIST.map(c=>c.name);
@@ -3513,7 +3521,18 @@ let tasks = JSON.parse(localStorage.getItem('brody_tasks_v2') || '[]');
 // pulls" rule, it has no reason to keep reappearing. A still-open row migrates as a live, due-today
 // task and stays linked in for today only, same as any other fresh one-off pull, so nothing currently
 // pending silently disappears without one last normal chance to close it out.
-(function migrateLegacyDatelessPlainRows(){
+// 2026-07-22 fix, per Brody's follow-up ("still showing" after the migration above shipped): this
+// only ran ONCE, synchronously, against whatever was in localStorage at page load — but Brody is
+// signed into cloud sync (see startCloudSync), whose onSnapshot listener fires shortly after,
+// asynchronously, with whatever was last written to Firestore. On a fresh load, lastSyncedUpdatedAt
+// starts at 0, so that incoming snapshot passes applyCloudSyncPayload's staleness guard no matter how
+// old it is and silently overwrites `tasks` — including a cloud copy saved from BEFORE this migration
+// even existed, quietly reverting it seconds after it ran, invisibly. Turned this into a plain,
+// idempotent function (safe to call more than once — a row it's already converted has a refTaskId,
+// so a second pass just skips it) and called again from applyCloudSyncPayload right after
+// `tasks=data.tasks`, so cloud data gets sanitized exactly like local data does, whichever one
+// actually wins the race.
+function migrateLegacyDatelessPlainRows(){
   let anyChanged=false;
   tasks.slice().forEach(t=>{
     if(!t.subtasks||!t.subtasks.length)return;
@@ -3549,7 +3568,9 @@ let tasks = JSON.parse(localStorage.getItem('brody_tasks_v2') || '[]');
     if(taskChanged){ t.subtasks=kept; anyChanged=true; }
   });
   if(anyChanged)localStorage.setItem('brody_tasks_v2',JSON.stringify(tasks));
-})();
+  return anyChanged;
+}
+migrateLegacyDatelessPlainRows();
 // 2026-07-07, per Brody's "locked" task idea (replaces the old separate Pool system): a locked,
 // non-recurring task resets itself back to unscheduled the moment it's completed (see toggle()'s
 // 2026-07-20, per Brody — tightened significantly, replacing the older, more conservative version
@@ -11001,8 +11022,11 @@ function renderFormSubtasks(){
     const linkRt=s.refTaskId?tasks.find(x=>x.id===s.refTaskId):null;
     const linkRecurBadge=(linkRt&&isRecurringTask(linkRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
     const linkIcon=s.refTaskId?`<i class="fa fa-link subtask-linked-icon"${safeRefId?` style="cursor:pointer" onclick="event.stopPropagation();openForm('${safeRefId}')"`:''} title="${p.missing?'Linked task was deleted':'Live-linked to &quot;'+escHtml(p.title)+'&quot; — click to open it, checking this completes that task too, wherever it lives'}"></i>${linkRecurBadge}`:'';
-    // Plain rows only — a referenced row is already a real task, nothing to convert.
-    const convertBtn=s.refTaskId?'':`<button type="button" class="subtask-convert" onclick="event.stopPropagation();convertFormSubtaskToTask(${i})" title="Turn into its own task"><i class="fa fa-share-square"></i></button>`;
+    // 2026-07-22, per Brody: removed the "turn into a task" convert button — every checklist item is
+    // already a real task by the time it reaches this render (createOneOffChecklistTask at typing
+    // time, plus migrateLegacyDatelessPlainRows for anything left over from before that model
+    // existed), so this button had nothing left to legitimately do.
+    const convertBtn='';
     // 2026-07-21, per Brody: every checklist item is a real task now (see createOneOffChecklistTask)
     // — its name should only ever change from that task's own Edit Task screen, not by clicking the
     // pill inline. Click-to-rename is retired; the text is now just a plain label, and clicking
@@ -11144,52 +11168,10 @@ function removeFormSubtask(i){
   renderFormSubtasks();
   liveSaveTask();
 }
-// Promotes a plain checklist row into a real, standalone task — the reverse of "Pull Task". The
-// new task inherits the group/category currently selected in the form (so it lands in the same
-// place), starts with no due date, and keeps whatever done state the checklist row already had.
-// The row itself then turns into a live-reference link to the new task (same spot in the list,
-// same look-and-feel as a pulled-in task) instead of disappearing — checking it off from here will
-// from now on complete the real task, wherever it lives.
-function convertFormSubtaskToTask(i){
-  const s=formSubtasks[i];
-  if(!s||s.refTaskId)return;
-  const title=(s.text||'').trim();
-  if(!title)return;
-  // 2026-07-10, per Brody: converting a checklist item while editing a CATEGORY's own task used to
-  // land the new task in Uncategorized instead of the category he was actually working in. Cause:
-  // openForm() force-blanks the f-category field for a category-block task (see its own comment,
-  // right above where f-category-row gets hidden) since a category can never be filed under itself
-  // — but this function was still reading that blanked field. Now it inherits the category straight
-  // from categoryRef when the task being edited is a category block, same as every other "which
-  // category does this belong to" lookup in the app already does.
-  const editingTask=editId?tasks.find(x=>x.id===editId):null;
-  const isEditingCategoryBlock=!!(editingTask&&editingTask.isCategoryBlock&&editingTask.categoryRef);
-  const newTask={
-    id:Date.now().toString()+Math.random().toString(36).slice(2,6),
-    title,
-    note:'',
-    starred:false,
-    group:isEditingCategoryBlock?editingTask.categoryRef.group:(document.getElementById('f-group').value||GRPS[0]||''),
-    category:isEditingCategoryBlock?editingTask.categoryRef.name:(document.getElementById('f-category').value.trim()||null),
-    due:null,
-    scheduledTime:null,
-    duration:null,
-    recurrence:{type:'never',days:[]},
-    tags:[],
-    subtasks:[],
-    done:!!s.done,
-    completedAt:s.done?Date.now():null,
-    completedDates:[],
-    createdAt:Date.now()
-  };
-  tasks.push(newTask);
-  formSubtasks[i]={id:s.id,refTaskId:newTask.id};
-  save(); // persists the new standalone task above no matter what
-  renderFormSubtasks();
-  renderAll3();
-  liveSaveTask(); // syncs this checklist (now containing a live reference) onto the task being
-                  // edited here — creates that task first if it's still brand-new
-}
+// 2026-07-22, per Brody: removed convertFormSubtaskToTask ("turn into its own task") — it existed to
+// promote a plain (non-refTaskId) checklist row into a real task, but every row is already a real
+// task by the time it's typed (createOneOffChecklistTask) or migrated (migrateLegacyDatelessPlainRows,
+// see the cloud-sync-resilience fix on that function), so this had nothing left to legitimately do.
 // Checking off one of a category's auto-member rows (see autoMemberRowsHTML above) straight from
 // the Edit Task screen — same idiom as toggleFormSubtask's own refTaskId branch: complete the real
 // task now, refresh this form immediately, then again after toggle()'s ~1.2s recurring rollover so
