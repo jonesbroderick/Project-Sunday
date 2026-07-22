@@ -10907,6 +10907,7 @@ function renderFormSubtasks(){
       // pill itself now toggles on click (excluding the grip, the link icon, and the ×); opening the
       // task moved onto the link icon specifically, instead of the whole row.
       return `<div class="checklist-row" style="cursor:pointer" title="Due or recurring today — click to toggle, drag to reorder" draggable="true"
+        data-drag-kind="automember" data-drag-index="${i}"
         ondragstart="autoMemberDragStart(event,${i})" ondragover="autoMemberDragOver(event,${i})"
         ondragleave="autoMemberDragLeave(event)" ondrop="autoMemberDrop(event,${i})" ondragend="autoMemberDragEnd(event)"
         onclick="toggleFormAutoMember('${safeId}')">
@@ -10959,6 +10960,7 @@ function renderFormSubtasks(){
     const linkedTime=linkedRt?effectiveTimeFor(linkedRt,todayKey()):null;
     const rowTimeTag=linkedTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(linkedTime)}</span>`:'';
     return `<div class="checklist-row${p.missing?' ref-missing':''}" draggable="true" style="cursor:pointer"
+    data-drag-kind="checklist" data-drag-index="${i}"
     ondragstart="checklistDragStart(event,${i})" ondragover="checklistDragOver(event,${i})"
     ondragleave="checklistDragLeave(event)" ondrop="checklistDrop(event,${i})" ondragend="checklistDragEnd(event)"
     onclick="toggleFormSubtask(${i})">
@@ -11068,8 +11070,19 @@ function addFormSubtask(raw){
   formSubtasks.push({id:'ref-'+newId+'-'+Date.now().toString(36)+Math.random().toString(36).slice(2,4),refTaskId:newId,pulledDate:todayKey()});
   const input=document.getElementById('f-subtask-input');
   if(input)input.value='';
-  renderFormSubtasks();
+  // 2026-07-21, per Brody (Dolo "ghost duplicate" report): liveSaveTask() MUST run before
+  // renderFormSubtasks() here, not after. This is a category block's checklist, so the render below
+  // also computes categoryAutoMemberTasksForBlock -> categoryAutoMemberTasksForCategory, which
+  // excludes a task via isTaskPulledIntoAnyChecklist(mt.id) — but that check reads the PERSISTED
+  // task's real t.subtasks array, not the local formSubtasks staging var. The one-off task just
+  // created above is filed under this same group/category, due today, so until liveSaveTask() writes
+  // formSubtasks back onto the real task (Object.assign(existing,data)), the brand-new task still
+  // reads as an unlinked auto-member and rendered a second time alongside its own real checklist
+  // row — a duplicate that "resolved itself" on the NEXT add (once the previous liveSaveTask() had
+  // caught up) or on navigating away and back (a fresh, fully-persisted reload). Saving first closes
+  // that gap so the render below always sees consistent, already-linked data.
   liveSaveTask();
+  renderFormSubtasks();
 }
 function removeFormSubtask(i){
   formSubtasks.splice(i,1);
@@ -11186,6 +11199,83 @@ function autoMemberDragEnd(e){
     el.classList.remove('drag-over');
   });
 }
+// ── Touch drag-to-reorder for the checklist grip (2026-07-21, per Brody) ───────────────────────
+// The native HTML5 Drag and Drop API used just above (checklistDragStart/Over/Drop/End,
+// autoMemberDragStart/Over/Drop/End) has NO touch support on iOS Safari — on Dolo the "three lines"
+// grip was visible but a touch-drag on it did nothing at all. This is a parallel, touch-only path
+// that reuses the exact same reorder math (splice for a plain pulled-in/typed row, categoryOrder
+// renumber for an auto-member row) and the exact same .dragging/.drag-over CSS classes for visual
+// feedback — just driven by touchstart/touchmove/touchend instead of dragstart/dragover/drop, so it
+// looks and behaves identically to the mouse version on Blanc. Delegated on document (not attached
+// per-row) since renderFormSubtasks() fully replaces every row's markup on every render — a
+// per-row listener would go stale the instant anything else changed.
+let touchDragState=null;
+function touchDragRowAt(clientY,wrap){
+  const rows=[...wrap.querySelectorAll('.checklist-row[data-drag-kind]')];
+  for(const row of rows){
+    const r=row.getBoundingClientRect();
+    if(clientY>=r.top&&clientY<=r.bottom)return row;
+  }
+  return null;
+}
+document.addEventListener('touchstart',function(e){
+  const grip=e.target.closest('.checklist-grip');
+  if(!grip)return;
+  const row=grip.closest('.checklist-row[data-drag-kind]');
+  const wrap=document.getElementById('form-subtask-rows');
+  if(!row||!wrap||!wrap.contains(row))return;
+  touchDragState={
+    kind:row.getAttribute('data-drag-kind'),
+    fromIndex:parseInt(row.getAttribute('data-drag-index'),10),
+    wrap,
+    startY:e.touches[0].clientY,
+    moved:false
+  };
+  row.classList.add('dragging');
+},{passive:true});
+document.addEventListener('touchmove',function(e){
+  if(!touchDragState)return;
+  const touch=e.touches[0];
+  if(!touchDragState.moved && Math.abs(touch.clientY-touchDragState.startY)>6) touchDragState.moved=true;
+  if(!touchDragState.moved)return;
+  e.preventDefault(); // once a real drag is underway, stop the checklist from also scrolling
+  touchDragState.wrap.querySelectorAll('.checklist-row.drag-over').forEach(el=>el.classList.remove('drag-over'));
+  const overRow=touchDragRowAt(touch.clientY,touchDragState.wrap);
+  if(overRow && overRow.getAttribute('data-drag-kind')===touchDragState.kind && overRow!==touchDragState.wrap.querySelector('.checklist-row.dragging')){
+    overRow.classList.add('drag-over');
+  }
+},{passive:false});
+document.addEventListener('touchend',function(e){
+  if(!touchDragState)return;
+  const state=touchDragState;
+  touchDragState=null;
+  state.wrap.querySelectorAll('.checklist-row.dragging,.checklist-row.drag-over').forEach(el=>{
+    el.classList.remove('dragging');
+    el.classList.remove('drag-over');
+  });
+  if(!state.moved)return; // a plain tap on the grip, not a drag — leave it alone, same as the mouse path ignoring a click
+  e.preventDefault(); // suppress the synthetic click iOS fires after touchend, so this doesn't also toggle the row done/undone
+  const touch=e.changedTouches[0];
+  const overRow=touchDragRowAt(touch.clientY,state.wrap);
+  if(!overRow||overRow.getAttribute('data-drag-kind')!==state.kind)return;
+  const toIndex=parseInt(overRow.getAttribute('data-drag-index'),10);
+  if(toIndex===state.fromIndex)return;
+  if(state.kind==='checklist'){
+    const [moved]=formSubtasks.splice(state.fromIndex,1);
+    formSubtasks.splice(toIndex,0,moved);
+    renderFormSubtasks();
+    liveSaveTask();
+  } else if(state.kind==='automember'){
+    const t=editId?tasks.find(x=>x.id===editId):null;
+    if(!t||!(t.isCategoryBlock&&t.categoryRef))return;
+    const members=categoryAutoMemberTasksForBlock(t,todayKey());
+    const [movedMt]=members.splice(state.fromIndex,1);
+    members.splice(toIndex,0,movedMt);
+    members.forEach((mt,idx)=>{ mt.categoryOrder=idx; });
+    save();
+    renderFormSubtasks();
+  }
+});
 function toggleFormSubtask(i){
   const s=formSubtasks[i];
   if(!s)return;
