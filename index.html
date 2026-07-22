@@ -3495,6 +3495,61 @@ let tasks = JSON.parse(localStorage.getItem('brody_tasks_v2') || '[]');
   });
   if(changed)localStorage.setItem('brody_tasks_v2',JSON.stringify(tasks));
 })();
+// One-time migration, 2026-07-22, per Brody: some one-off items under a recurring category (his
+// example: Calls) kept reappearing day after day even though he'd checked them off yesterday, and
+// several days before that. Root cause: these were genuinely ancient plain checklist rows — typed in
+// before `dateAdded` existed at all, let alone the 2026-07-16 "everything typed into a checklist is a
+// real task now" change (see createOneOffChecklistTask). Both subtaskVisibleOnDate and
+// sweepStalePulledLinks deliberately leave a dateless plain row alone forever ("no way to know its
+// 'today'") — and a recurring category's own plain rows track completion via day-scoped `doneDates`,
+// so a row done YESTERDAY but not specifically TODAY reads as open again today, with nothing to ever
+// retire it. Exactly the "stuck in the old loop" Brody suspected.
+//
+// Converts every such row into a real one-off task (today's model for anything typed into a
+// checklist), filed under the same group/category as the host block. A row that was EVER completed
+// (any doneDates entry, or plain s.done) migrates as an already-done task, carrying its real
+// completedDates history over, and is dropped from the checklist entirely — it's resolved history,
+// not "today's business," so per Brody's "nothing should stay in the checklist except recurring
+// pulls" rule, it has no reason to keep reappearing. A still-open row migrates as a live, due-today
+// task and stays linked in for today only, same as any other fresh one-off pull, so nothing currently
+// pending silently disappears without one last normal chance to close it out.
+(function migrateLegacyDatelessPlainRows(){
+  let anyChanged=false;
+  tasks.slice().forEach(t=>{
+    if(!t.subtasks||!t.subtasks.length)return;
+    let taskChanged=false;
+    const kept=[];
+    t.subtasks.forEach(s=>{
+      if(s.refTaskId||s.dateAdded){ kept.push(s); return; } // not a legacy row — leave untouched
+      taskChanged=true;
+      const everDone=!!(s.done||(s.doneDates&&s.doneDates.length));
+      const grp=(t.isCategoryBlock&&t.categoryRef)?t.categoryRef.group:t.group;
+      const cat=(t.isCategoryBlock&&t.categoryRef)?t.categoryRef.name:(t.category||null);
+      const newTask={
+        id:Date.now().toString()+Math.random().toString(36).slice(2,6),
+        title:(s.text||'Untitled checklist item').trim()||'Untitled checklist item',
+        note:'', starred:false,
+        group:grp||'', category:cat||null,
+        locked:false,
+        due:todayKey(),
+        scheduledTime:null, duration:null,
+        recurrence:{type:'never',days:[]},
+        tags:[], subtasks:[],
+        done:everDone,
+        completedAt:everDone?Date.now():null,
+        completedDates:(s.doneDates&&s.doneDates.length)?[...s.doneDates]:(everDone?[todayKey()]:[]),
+        createdAt:Date.now()
+      };
+      tasks.push(newTask);
+      if(!everDone){
+        kept.push({id:'ref-'+newTask.id+'-'+Date.now().toString(36),refTaskId:newTask.id,pulledDate:todayKey()});
+      }
+      // already-done rows are simply dropped from the checklist — resolved history, not relinked.
+    });
+    if(taskChanged){ t.subtasks=kept; anyChanged=true; }
+  });
+  if(anyChanged)localStorage.setItem('brody_tasks_v2',JSON.stringify(tasks));
+})();
 // 2026-07-07, per Brody's "locked" task idea (replaces the old separate Pool system): a locked,
 // non-recurring task resets itself back to unscheduled the moment it's completed (see toggle()'s
 // 2026-07-20, per Brody — tightened significantly, replacing the older, more conservative version
