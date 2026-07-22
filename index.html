@@ -7204,8 +7204,16 @@ function duplicateTimeBlock(id){
   // 2026-07-16: moved up from further below so the still-open plain rows just under this can use it
   // — see the createOneOffChecklistTask call, which needs to know which category to file under.
   const fromCategory=!!(t.isCategoryBlock&&t.categoryRef);
+  // 2026-07-22 fix, per Brody ("duplicated Calls, it added 4 more tasks to the checklist that aren't
+  // on the existing/primary block"): this only ever checked "not done today," never whether the row
+  // was actually VISIBLE today (subtaskVisibleOnDate) — so a stale one-off pull whose pulledDate had
+  // already passed (correctly hidden in the real Calls block, just not yet physically swept out of
+  // its subtasks array by sweepStalePulledLinks' once-a-day pass) got silently resurrected into the
+  // duplicate anyway. Flagged as a known gap back in [[project_category_quickview_date_sync_fix]] and
+  // never actually hit until now — adding the same visibility check every other checklist read in the
+  // app already uses closes it.
   const openSubtasks=(t.subtasks||[])
-    .filter(s=>!subtaskDoneForDate(s,todayKey(),t))
+    .filter(s=>subtaskVisibleOnDate(s,todayKey())&&!subtaskDoneForDate(s,todayKey(),t))
     .map(s=>s.refTaskId
       ? {id:'ref-'+s.refTaskId+'-'+Date.now().toString(36)+Math.random().toString(36).slice(2,4), refTaskId:s.refTaskId, pulledDate:todayKey()}
       // 2026-07-16, per Brody: a plain row is never copied as inert text anymore — every typed
