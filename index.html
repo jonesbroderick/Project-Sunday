@@ -1821,7 +1821,18 @@ let cloudSyncDebounceTimer = null;
 // the first click's state, so it looked like nothing happened. Tracks the `updatedAt` stamp of the
 // payload WE last sent, so an incoming snapshot that's no newer than our own last write (i.e. it's
 // just an echo of something we already know about) gets ignored instead of re-applied.
-let lastSyncedUpdatedAt = 0;
+// 2026-07-22 fix, per Brody: a brand-new locked task ("Stretch," created under Gym) vanished after a
+// page refresh. This variable used to reset to 0 on every fresh load, which only protects against a
+// stale echo of a write made THIS SAME SESSION — it did nothing to protect a local edit that was
+// still sitting in the 1.2s queueCloudSync debounce window when the page was refreshed (the pending
+// write is destroyed with the page; it never reached Firestore at all). On reload, the cloud's last
+// SUCCESSFUL write — from before "Stretch" existed — looked newer than the reset-to-0 guard, so it
+// was accepted and silently overwrote local `tasks`, wiping the not-yet-synced task out. Now persists
+// to localStorage every time save() runs (see save()'s own comment) and seeds from that persisted
+// value on load instead of always starting at 0 — so a local edit survives a same-device refresh even
+// if its cloud write never had time to go out, and an incoming snapshot only wins if it's genuinely
+// newer than the last thing THIS device knows it changed, reload or not.
+let lastSyncedUpdatedAt = parseInt(localStorage.getItem('brody_last_local_update')||'0',10)||0;
 
 function authShowError(msg){
   const el=document.getElementById('auth-error');
@@ -1898,18 +1909,21 @@ function applyCloudSyncPayload(data){
   // Ignore an echo of (or anything no newer than) our own last write — see lastSyncedUpdatedAt's
   // comment above. A genuinely newer remote change (another device, or the first load after signing
   // in) always has a strictly greater updatedAt and still gets applied normally.
-  if(data.updatedAt&&data.updatedAt<=lastSyncedUpdatedAt)return;
+  if(data.updatedAt&&data.updatedAt<=lastSyncedUpdatedAt){
+    // 2026-07-22, per Brody's "Stretch disappeared" report: we just correctly refused to overwrite
+    // local data with something older (e.g. a not-yet-synced local edit survived a refresh) — but the
+    // cloud itself is still stale at this point. Push our own, actually-current data back up so it
+    // stops offering this same outdated snapshot on the next load or to another signed-in device.
+    queueCloudSync();
+    return;
+  }
   if(data.updatedAt)lastSyncedUpdatedAt=data.updatedAt;
   cloudSyncApplyingRemote=true;
   if(Array.isArray(data.tasks))tasks=data.tasks;
-  // 2026-07-22 fix, per Brody: an incoming cloud snapshot can be older than the last local-data
-  // migration that ran at page load (e.g. it was saved from a session before that migration even
-  // existed) — this used to silently overwrite the freshly-migrated `tasks` with the same stale data
-  // it just fixed, seconds after fixing it, since a fresh page load's lastSyncedUpdatedAt starts at 0
-  // and lets any incoming snapshot straight through. Re-running the (idempotent) migration on
-  // whatever just came down from the cloud closes that gap regardless of which copy actually won the
-  // race.
-  migrateLegacyDatelessPlainRows();
+  // migrateLegacyDatelessPlainRows(); // HALTED 2026-07-22 — this migration turned out to be far
+  // broader than intended (mass-created tasks from months of old checklist history, not just the
+  // handful of stale Calls rows it was meant for). Disabled here too so a cloud sync round-trip can
+  // never re-trigger it. See the halt note above the function definition for the full story.
   if(Array.isArray(data.GRP_LIST)&&data.GRP_LIST.length){
     GRP_LIST=data.GRP_LIST;
     GRPS=GRP_LIST.map(c=>c.name);
@@ -3553,7 +3567,7 @@ function migrateLegacyDatelessPlainRows(){
         due:todayKey(),
         scheduledTime:null, duration:null,
         recurrence:{type:'never',days:[]},
-        tags:[], subtasks:[],
+        tags:['_migrated-legacy-checklist-row'], subtasks:[], // marker tag — see 2026-07-22 halt note above
         done:everDone,
         completedAt:everDone?Date.now():null,
         completedDates:(s.doneDates&&s.doneDates.length)?[...s.doneDates]:(everDone?[todayKey()]:[]),
@@ -3570,7 +3584,19 @@ function migrateLegacyDatelessPlainRows(){
   if(anyChanged)localStorage.setItem('brody_tasks_v2',JSON.stringify(tasks));
   return anyChanged;
 }
-migrateLegacyDatelessPlainRows();
+// 2026-07-22 — HALTED, per Brody: this migration turned out to be far broader than intended. It
+// scanned EVERY task's subtasks array app-wide (not just the Calls example that surfaced the bug),
+// and "dateless plain row" turned out to describe basically every checklist item Brody had ever typed
+// before the app's various 2026-07 checklist refactors — months of history, not a handful of stale
+// rows. Brody confirmed it mass-created a flood of new tasks (many already completed, some from an
+// old duplicate Calls block) all stamped due=today. Both call sites below are commented out so this
+// can never fire again (including via applyCloudSyncPayload's re-run, which would otherwise keep
+// re-triggering it against stale cloud snapshots on every sync). The function itself is left in place,
+// now tagging anything it creates with '_migrated-legacy-checklist-row' — NOT yet re-enabled. Do not
+// turn this back on without a much narrower scope (e.g. only categories Brody names, or a dry-run
+// preview) and his explicit go-ahead. See [[project_checklist_auto_member_removal_v227]] for the full
+// incident writeup and cleanup plan.
+// migrateLegacyDatelessPlainRows(); // HALTED 2026-07-22 — see comment above
 // 2026-07-07, per Brody's "locked" task idea (replaces the old separate Pool system): a locked,
 // non-recurring task resets itself back to unscheduled the moment it's completed (see toggle()'s
 // 2026-07-20, per Brody — tightened significantly, replacing the older, more conservative version
@@ -4918,7 +4944,11 @@ function handleQuickAddCatTaskKey(event,grp,catName){
   if(fresh) fresh.focus();
 }
 
-function save(){localStorage.setItem('brody_tasks_v2',JSON.stringify(tasks));queueCloudSync();}
+// 2026-07-22, per Brody's "Stretch disappeared after refresh" report: stamps every local save so
+// lastSyncedUpdatedAt (see its own comment) can survive a page reload, not just this same session —
+// otherwise a not-yet-cloud-synced edit made right before a refresh had no defense against an older
+// incoming Firestore snapshot silently overwriting it on the next load.
+function save(){localStorage.setItem('brody_tasks_v2',JSON.stringify(tasks));localStorage.setItem('brody_last_local_update',String(Date.now()));queueCloudSync();}
 // Use local date parts (not UTC) so dates always match the date picker value
 function todayKey(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
 function dayKey(d){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
