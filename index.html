@@ -1960,6 +1960,29 @@ function applyCloudSyncPayload(data){
     queueCloudSync();
     return;
   }
+  // 2026-07-22 — SERIOUS SAFETY NET, per Brody: real tasks (a locked "Stretch," a freshly-scheduled
+  // "Walk," an entire pulled-in "Focus" category with typed checklist items) have been silently wiped
+  // out more than once by an incoming snapshot that looked "valid" by the updatedAt check above but
+  // was actually the wrong data entirely — most likely a completely different Firestore document
+  // (e.g. this device authenticated under a different sign-in method/UID than whichever session last
+  // wrote the real data, so `docRef` here points at an unrelated, much older or empty document that
+  // nonetheless "wins" per this function's own original design). A timestamp alone can't be trusted to
+  // catch that, since the wrong document can still have its own internally-consistent updatedAt.
+  // Real sync should essentially never look like a big, sudden drop in task count — if it does, this
+  // refuses to apply it and instead pushes THIS device's own data back up, protecting whatever's
+  // actually here rather than trusting a snapshot that looks suspicious. This is deliberately blunt:
+  // it can be wrong in the rare case a huge legitimate bulk-delete elsewhere raced against this load,
+  // but given the choice between "occasionally ignore a real shrink" and "occasionally erase months of
+  // real work with zero trace," blunt-but-safe wins without question.
+  if(Array.isArray(data.tasks)){
+    const incomingCount=data.tasks.length;
+    const localCount=tasks.length;
+    if(localCount>5 && incomingCount<localCount*0.7){
+      console.error('[cloud sync] REFUSED an incoming snapshot with',incomingCount,'tasks vs',localCount,'currently on this device — looked like data loss, not a real sync. Keeping local data and pushing it up instead.');
+      queueCloudSync();
+      return;
+    }
+  }
   if(data.updatedAt)lastSyncedUpdatedAt=data.updatedAt;
   cloudSyncApplyingRemote=true;
   if(Array.isArray(data.tasks))tasks=data.tasks;
