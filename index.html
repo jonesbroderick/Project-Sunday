@@ -8461,17 +8461,26 @@ function categoryAutoMemberTasksForCategory(group,name,dateKey){
     !(mt.categoryDuplicate&&mt.categoryDuplicate.group===group&&mt.categoryDuplicate.name===name)
   ).sort((a,b)=>(a.categoryOrder??Infinity)-(b.categoryOrder??Infinity));
 }
+// 2026-07-23: only nests members whose own time actually overlaps the block's own window — see
+// categoryMemberOverlapsActiveBlock's own comment (defined below, near categoryHasActiveBlockOnDate)
+// for the full reasoning. A member that's clear of the block's window is excluded here so it doesn't
+// ALSO show up nested in this real block's checklist/sidebar once it's standing on its own as a top-
+// level block (see isSurfacedAsCategoryMemberToday's matching check).
 function categoryAutoMemberTasksForBlock(t,dateKey){
   if(!(t.isCategoryBlock&&t.categoryRef))return [];
-  return categoryAutoMemberTasksForCategory(t.categoryRef.group,t.categoryRef.name,dateKey);
+  return categoryAutoMemberTasksForCategory(t.categoryRef.group,t.categoryRef.name,dateKey)
+    .filter(mt=>categoryMemberOverlapsActiveBlock(mt,dateKey));
 }
 // 2026-07-15, per Brody: "put a clock icon on the category itself so I can tell one of its checklist
 // items has a specific time, even when the checklist is collapsed" — checks both ways a task can be
 // one of this category's checklist items: filed under it via t.category (categoryAutoMemberTasksForCategory,
 // covers both real-block and no-schedule/virtual-host categories) or explicitly pulled into the
 // category's own schedule task as a subtasks link (refTaskId), visible today.
+// 2026-07-23 fix: only counts a timed member that actually nests here (categoryMemberOverlapsActiveBlock)
+// — a member that's clear of this block's own window stands alone as its own block elsewhere now, so
+// hinting "something in here has a time" would point at nothing once it's escaped.
 function categoryHasTimedChecklistItemToday(group,name,dateKey){
-  if(categoryAutoMemberTasksForCategory(group,name,dateKey).some(mt=>!!effectiveTimeFor(mt,dateKey)))return true;
+  if(categoryAutoMemberTasksForCategory(group,name,dateKey).some(mt=>!!effectiveTimeFor(mt,dateKey)&&categoryMemberOverlapsActiveBlock(mt,dateKey)))return true;
   const scheduleTask=tasks.find(x=>x.isCategoryBlock&&x.categoryRef&&x.categoryRef.group===group&&x.categoryRef.name===name);
   if(!scheduleTask)return false;
   return (scheduleTask.subtasks||[]).some(s=>{
@@ -8504,11 +8513,43 @@ function categoryMemberTasksDueOn(group,name,dateKey){
     !(t.categoryDuplicate&&t.categoryDuplicate.group===group&&t.categoryDuplicate.name===name)
   ).sort(byDueTime);
 }
+// Finds this category's own real, active calendar block (an isCategorySchedule task with an
+// effective time) sitting on dateKey, or null if it doesn't have one that day. Hoisted out of
+// categoryHasActiveBlockOnDate below so categoryMemberOverlapsActiveBlock can reuse the exact same
+// lookup instead of a second, easily-diverging copy of the same predicate.
+function getCategoryActiveScheduleTaskOnDate(group,name,dateKey){
+  return tasks.find(t=>t.isCategoryBlock&&t.categoryRef&&t.categoryRef.group===group&&t.categoryRef.name===name&&effectiveTimeFor(t,dateKey)&&(t.due===dateKey||recurrenceMatchesDate(t,dateKey)))||null;
+}
 // Does this category have a real, active calendar block (an isCategorySchedule task with an
 // effective time) sitting on dateKey? If so, its due-today members nest straight into that block's
 // checklist/sidebar — see categoryAutoMemberTasksForBlock — and don't need a separate virtual host.
 function categoryHasActiveBlockOnDate(group,name,dateKey){
-  return tasks.some(t=>t.isCategoryBlock&&t.categoryRef&&t.categoryRef.group===group&&t.categoryRef.name===name&&effectiveTimeFor(t,dateKey)&&(t.due===dateKey||recurrenceMatchesDate(t,dateKey)));
+  return !!getCategoryActiveScheduleTaskOnDate(group,name,dateKey);
+}
+// 2026-07-23, per Brody: "say Habits had its own recurring schedule every morning, but I'd still
+// want 10 min walk scheduled at its own time OUTSIDE of the Habits block schedule." Generalizes the
+// "10 min walk" fix just below (categories with no active block at all) to categories that DO have
+// one, like Calls. A timed member only genuinely needs to nest inside its category's real block
+// when the two time windows actually overlap — if the member's own time sits clear of the block's
+// window, there's nothing to visually conflict with, so it can stand on its own instead, exactly
+// like the no-active-block case already does. If they DO overlap, this is exactly the original
+// 2026-07-15 Chiro-bug case (a timed member sitting right on top of its own category's block) —
+// nesting it is still the right call there, unchanged. An untimed member has no time of its own to
+// be "outside" anything, so it always nests, same as before. Shared by
+// isSurfacedAsCategoryMemberToday (decides the top-level calendar slot) and
+// categoryAutoMemberTasksForBlock (decides the real block's own nested rows) so the two can never
+// disagree about which one a given member belongs in.
+function categoryMemberOverlapsActiveBlock(mt,dateKey){
+  const scheduleTask=getCategoryActiveScheduleTaskOnDate(mt.group,mt.category,dateKey);
+  if(!scheduleTask)return false; // no active block at all — nothing to overlap with
+  const mtTime=effectiveTimeFor(mt,dateKey);
+  if(!mtTime)return true; // untimed member — always nests, unaffected by any of this
+  const blockTime=effectiveTimeFor(scheduleTask,dateKey);
+  const [bh,bm]=blockTime.split(':').map(Number);
+  const bStart=bh*60+bm, bEnd=bStart+(scheduleTask.duration||30);
+  const [mh,mm]=mtTime.split(':').map(Number);
+  const mStart=mh*60+mm, mEnd=mStart+(mt.duration||30);
+  return mStart<bEnd&&mEnd>bStart;
 }
 // 2026-07-15, per Brody: a task filed under a category (t.category) that's actually counted as a
 // live member today (categoryAutoMemberTasksForCategory) is ALWAYS surfaced as a checklist item
@@ -8520,19 +8561,15 @@ function categoryHasActiveBlockOnDate(group,name,dateKey){
 // pulled-in link. Checking real membership (not just "does it have a category set") guards against
 // an orphaned/deleted category or a task that's actually pulled into some OTHER checklist instead —
 // either of those should keep its own block rather than silently vanish from the calendar.
-// 2026-07-23 fix, per Brody ("10 min walk" under Habits): the "whether or not it has its own
-// scheduled time" part above was too broad. A category WITH an active schedule block (Calls, etc.)
-// genuinely has nowhere else on the calendar for a timed member to go but nested inside that real
-// block — that's the actual Chiro-bug case this rule was written for, still fully honored below. But
-// a category with NO active block (Habits-style) has no calendar presence of its own at all — its
-// members only ever land in the flat "no time set" virtual host card, which ignores each member's
-// own time entirely. A member that DOES have its own specific time genuinely belongs on the
-// calendar at that time like any other Time Block, so it no longer counts as "surfaced elsewhere"
-// in that case — see virtualCategoryHostsForDate's matching fix so it isn't ALSO shown nested in
-// the virtual host card once it stands on its own.
+// 2026-07-23 fix, per Brody ("10 min walk" under Habits, then generalized to "outside the Habits
+// block schedule" the same day — see categoryMemberOverlapsActiveBlock's own comment for the full
+// story): the "whether or not it has its own scheduled time" part above was too broad. A timed
+// member only stays "surfaced elsewhere" (and thus excluded from its own top-level slot) when it
+// actually overlaps its category's active block — no active block at all, or a clear/non-
+// overlapping time against one that exists, both mean it stands on its own instead.
 function isSurfacedAsCategoryMemberToday(mt,dateKey){
   if(!mt||mt.isCategoryBlock||!mt.category)return false;
-  if(effectiveTimeFor(mt,dateKey)&&!categoryHasActiveBlockOnDate(mt.group,mt.category,dateKey))return false;
+  if(effectiveTimeFor(mt,dateKey)&&!categoryMemberOverlapsActiveBlock(mt,dateKey))return false;
   return categoryAutoMemberTasksForCategory(mt.group,mt.category,dateKey).some(x=>x.id===mt.id);
 }
 // 2026-07-06, follow-up per Brody: "if there is a task under chores that is scheduled for today
