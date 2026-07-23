@@ -3047,12 +3047,25 @@ function addCategoryPrompt(grp){
    Categories tab and the "All" pill's collapsed group are both untouched — this is a second, lighter
    entry point into a category, not a replacement for either. Clicking the card opens the same
    category editor its header already opens elsewhere in the app. */
+// 2026-07-23 fix, per Brody ("Focus" bug): this used to null scheduleTask out entirely unless the
+// category's OWN recurring pattern matched today (scheduleToday) — but a category can have real
+// tasks typed or pulled straight into its checklist (scheduleTask.subtasks) well before it's ever
+// given a schedule of its own. Those tasks get tagged with this category (t.category) AND linked
+// into the checklist at the same time — categoryMemberTasksDueOn deliberately excludes anything
+// already linked into a checklist (to avoid double-counting), on the assumption it'll show up via
+// the schedule task's own subtasks instead. But with scheduleTask nulled here, that path never got
+// checked either — so a typed-in task fell through BOTH checks and never showed up in Today at all,
+// even though it's sitting right there, real, due today, in the category's own checklist. Now
+// scheduleTask is also passed through whenever it has at least one checklist link actually visible
+// today, regardless of whether its own recurrence matches — categoryTodayFullyDone/categoryCardHTML
+// already handle a non-recurring scheduleTask correctly (falls back to its own done flag).
 function categoryTodayActivity(grp,name){
   const tk=todayKey();
   const scheduleTask=getCategoryScheduleTask(grp,name);
   const scheduleToday=!!(scheduleTask&&isRecurringTask(scheduleTask)&&recurrenceMatchesDate(scheduleTask,tk));
+  const hasVisibleLinksToday=!!(scheduleTask&&(scheduleTask.subtasks||[]).some(s=>subtaskVisibleOnDate(s,tk)));
   const items=poolDayItemsForDate(grp,name,tk);
-  return {scheduleTask:scheduleToday?scheduleTask:null, items};
+  return {scheduleTask:(scheduleToday||hasVisibleLinksToday)?scheduleTask:null, items};
 }
 // 2026-06-29: Brody checked off the Gym schedule task AND both of today's pool items (Shoulders,
 // Legs) — the Day Planner correctly showed all three as done/struck-through, but the Due Today
@@ -8600,7 +8613,22 @@ function virtualCategoryHostsForDate(dateKey){
       // category everywhere else, this filter only affects what this one calendar-facing card shows.
       const members=categoryAutoMemberTasksForCategory(grp,name,dateKey).filter(mt=>!effectiveTimeFor(mt,dateKey));
       const poolItems=poolDayItemsForDate(grp,name,dateKey);
-      if(members.length||poolItems.length)hosts.push({group:grp,name,members,poolItems});
+      // 2026-07-23 fix, per Brody ("Focus" bug): a task typed or pulled directly into this
+      // category's own checklist (its backing task's own `subtasks`, refTaskId links) never showed
+      // up anywhere on My Day when the category had no active schedule block — this virtual host
+      // only ever drew from `members` (tasks tagged via the Category field, and specifically NOT
+      // already linked into a checklist, to avoid double-counting) and pool items, never the
+      // schedule task's own linked rows. A real schedule block already shows both side by side
+      // (categoryAutoMemberTasksForBlock's members + its own subtasks, see renderPlanner) — this
+      // gives the no-schedule case the same two-source treatment. Untimed only, same reasoning as
+      // members above — a linked task with its own time already gets its own independent block.
+      const scheduleTask=getCategoryScheduleTask(grp,name);
+      const ownRows=scheduleTask?(scheduleTask.subtasks||[]).filter(s=>{
+        if(!subtaskVisibleOnDate(s,dateKey))return false;
+        const rt=s.refTaskId?tasks.find(x=>x.id===s.refTaskId):null;
+        return !(rt&&effectiveTimeFor(rt,dateKey));
+      }):[];
+      if(members.length||poolItems.length||ownRows.length)hosts.push({group:grp,name,members,poolItems,ownRows,scheduleTask});
     });
   });
   return hosts;
@@ -8744,12 +8772,21 @@ function handleSidebarHostClick(id){
 // 2026-07-07 fix: now also takes poolItems (pulled pool checklist items) alongside member tasks —
 // Chores-style categories are very often pool-only, so a card that only ever showed member tasks
 // would stay invisible for exactly the categories that most needed it (see virtualCategoryHostsForDate).
-function virtualCategoryTrayCardHTML(group,name,members,poolItems,dateKey){
+// 2026-07-23 fix, per Brody ("Focus" bug): a task typed or pulled directly into this no-schedule
+// category's own checklist (ownRows — the schedule task's real `subtasks`, refTaskId links) never
+// showed up here at all before, only `members` (category-tagged tasks NOT already linked, to avoid
+// double-counting — see virtualCategoryHostsForDate's matching comment) and pool items. ownRows/
+// scheduleTask are optional (default to none) so any other/older caller of this function keeps
+// working exactly as before.
+function virtualCategoryTrayCardHTML(group,name,members,poolItems,dateKey,ownRows,scheduleTask){
   const cc=GRP_COLORS[group]||'#888';
   const safeGrp=group.replace(/'/g,"\\'");
   const safeName=name.replace(/'/g,"\\'");
   poolItems=poolItems||[];
-  const openCount=members.filter(mt=>!plannerChecked(mt,dateKey)).length+poolItems.filter(i=>!i.done).length;
+  ownRows=ownRows||[];
+  const safeScheduleTaskId=scheduleTask?String(scheduleTask.id).replace(/'/g,"\\'"):null;
+  const openCount=members.filter(mt=>!plannerChecked(mt,dateKey)).length+poolItems.filter(i=>!i.done).length
+    +ownRows.filter(s=>!subtaskDoneForDate(s,dateKey,scheduleTask)).length;
   // 2026-07-13 fix, per Brody: matches the My Day sidebar's own nested-child look exactly now —
   // plain dark rows (.sidebar-task.sidebar-subtask), not a colored left-border accent.
   const memberRows=members.map(mt=>{
@@ -8778,13 +8815,33 @@ function virtualCategoryTrayCardHTML(group,name,members,poolItems,dateKey){
       <div class="sidebar-task-body"><div class="sidebar-task-title${item.done?' done':''}">${escHtml(item.text)}<i class="fa fa-tint" style="font-size:10px;opacity:.5;margin-left:4px" title="Pool item"></i></div></div>
     </div>`;
   }).join('');
+  // 2026-07-23 fix: a task typed straight into this category's own checklist, or pulled in via
+  // "Pull in an existing task" (a real refTaskId link on the schedule task itself, not just tagged
+  // via the Category field) — same idea as inlineOwnRowsHTML on the All Tasks category card, and the
+  // sidebar's own-row rendering for a real schedule block, just rendered in this card's row style.
+  const ownRowsHTML=ownRows.map(s=>{
+    const p=subRowParts(s);
+    const done=subtaskDoneForDate(s,dateKey,scheduleTask);
+    const safeSId=String(s.id).replace(/'/g,"\\'");
+    const toggleOnclick=`event.stopPropagation();toggleSubtaskDone('${safeScheduleTaskId}','${safeSId}','${dateKey}');renderPlanner();renderAll3()`;
+    const linkedRt=s.refTaskId&&!p.missing?tasks.find(x=>x.id===s.refTaskId):null;
+    const rowTime=linkedRt?effectiveTimeFor(linkedRt,dateKey):null;
+    const timeTagHTML=rowTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(rowTime)}</span>`:'';
+    const recurBadge=(linkedRt&&isRecurringTask(linkedRt))?'<i class="fa fa-refresh checklist-recur-badge" title="Recurring — auto-pulled in on its scheduled days"></i>':'';
+    const linkIcon=s.refTaskId?`<i class="fa fa-link subtask-linked-icon" onclick="event.stopPropagation();openForm('${s.refTaskId.replace(/'/g,"\\'")}')" title="Live-linked task — click to open"></i>${recurBadge}`:'';
+    return `<div class="sidebar-task sidebar-subtask${done?' done-task':''}" style="cursor:pointer" onclick="${toggleOnclick}">
+      <button class="check-btn ${done?'done':''}" onmousedown="event.stopPropagation()" onclick="${toggleOnclick}">${done?'<i class="fa fa-check"></i>':''}</button>
+      <div class="sidebar-task-body"><div class="sidebar-task-title${done?' done':''}">${escHtml(p.title)}${timeTagHTML}${linkIcon}</div></div>
+      <button class="sidebar-delete" onmousedown="event.stopPropagation()" onclick="event.stopPropagation();removeSidebarChecklistChild('${safeScheduleTaskId}','${safeSId}','${s.refTaskId?s.refTaskId.replace(/'/g,"\\'"):''}',false,'${dateKey}')" title="Remove from today's checklist — never deletes the task itself">×</button>
+    </div>`;
+  }).join('');
   // 2026-07-13: same parent-color-tint treatment as the sidebar hosts above — this card has no
   // backing task id (it's a virtual stand-in, see virtualCategoryHostsForDate), so its own
   // group+name makes a stable key into the same shared plannerChecklistExpanded set instead.
   // Follow-up, same day: no more chevron button — a plain click on the card now toggles this
   // (handleVirtualCategoryCardClick), double-click still opens the full category screen.
   const vKey='vcat-'+group+'-'+name;
-  const vChildCount=members.length+poolItems.length;
+  const vChildCount=members.length+poolItems.length+ownRows.length;
   const vExpanded=vChildCount&&plannerChecklistExpanded.has(vKey);
   // 2026-07-23 fix: this used to re-query categoryHasTimedChecklistItemToday (the FULL, unfiltered
   // member list) — but as of virtualCategoryHostsForDate's matching fix, a timed member is never
@@ -8798,7 +8855,7 @@ function virtualCategoryTrayCardHTML(group,name,members,poolItems,dateKey){
     <span class="tray-chip-title"><i class="fa fa-layer-group" style="margin-right:6px;opacity:.6"></i>${escHtml(name)}${timedChecklistReminderIcon}</span>
     <span class="tray-chip-meta">${openCount?`${openCount} due`:'<i class="fa fa-check"></i> All done'}</span>
   </div>
-  ${vExpanded?`<div onclick="event.stopPropagation()">${memberRows}${poolRows}</div>`:''}`;
+  ${vExpanded?`<div onclick="event.stopPropagation()">${ownRowsHTML}${memberRows}${poolRows}</div>`:''}`;
 }
 // Same 300ms hold-and-see click/double-click split as handleSidebarHostClick — single click
 // toggles this virtual category card's checklist, double click opens its full details.
@@ -9209,7 +9266,7 @@ function renderPlanner(){
     // as their own pseudo-card with the member(s) nested underneath — same "category owns its
     // members" grouping the real-calendar-block case already gets, just without a calendar tile
     // to anchor to.
-    virtualHosts.forEach(h=>html+=virtualCategoryTrayCardHTML(h.group,h.name,h.members,h.poolItems,plannerDate));
+    virtualHosts.forEach(h=>html+=virtualCategoryTrayCardHTML(h.group,h.name,h.members,h.poolItems,plannerDate,h.ownRows,h.scheduleTask));
     // 2026-07-06, per Brody: this list needs to be draggable straight onto the calendar (a
     // duplicated Time Block with no time yet was stuck here until manually edited) — switched from
     // the plain, non-draggable taskCardHTML to the same tray-chip row + initTrayDrag/mouseup
