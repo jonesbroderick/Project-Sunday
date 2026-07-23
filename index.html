@@ -1946,20 +1946,44 @@ function queueCloudSync(){
   },1200);
 }
 // 2026-07-22 — the hard, deterministic guarantee behind the "no task ever vanishes from an incoming
-// sync" fix. This ADDS-ONLY BY ID: an incoming snapshot can never revive or silently reintroduce a task
-// this device doesn't want. What decides whether a task sticks around now has two parts, updated
-// 2026-07-23 to also support real cross-device deletes (see DELETED_TASK_IDS above and
-// mergeDeletedTaskIds below): a task already on this device is kept UNLESS its id has a tombstone
-// (deleted here, or reported deleted by the other device); an incoming task not already present here
-// gets added UNLESS its id has a tombstone. Either way, a tombstoned id can never come back — that's
-// what makes "delete on Dolo also deletes on Blanc" safe to allow at all, instead of the pure add-only
-// version of this function that shipped first (see the deleted-task-ids block above for why add-only
-// alone wasn't enough for Brody).
+// sync" fix: an incoming snapshot can never revive or silently reintroduce a task this device has a
+// tombstone for (see DELETED_TASK_IDS above and mergeDeletedTaskIds below) — that's what makes
+// "delete on Dolo also deletes on Blanc" safe to allow at all. That guarantee is untouched by the
+// 2026-07-23 update just below (see that comment) — this function went from "never touch a task id
+// that already exists locally" to "replace it with the incoming copy," but a tombstoned id still
+// can never come back either way, and a task present ONLY on this device (missing from the incoming
+// snapshot, no tombstone) is still never dropped just for being absent.
+// 2026-07-23 fix, per Brody: "Amazon order" (a task under Quick Wins) got a due date set on Blanc
+// that never reached Dolo, even after a full refresh both ways — traced to this function being
+// pure add-only BY ID. That was fine for brand-new tasks, but for an id ALREADY known on this
+// device, the incoming copy was thrown away entirely, no matter what changed on the other device.
+// So once a task existed on both Blanc and Dolo, editing ANY field of it on one — due date, title,
+// time, whatever — could never propagate to the other, ever, silently. That's a much bigger problem
+// than it looks: it broke ordinary editing, not just this one field on this one task.
+// Fix: an incoming task whose id already exists locally now REPLACES the local copy instead of
+// being ignored. This is safe to do unconditionally here because applyCloudSyncPayload already
+// confirmed the whole incoming payload is strictly newer than this device's own last-synced state
+// before ever calling this function (see its own updatedAt<=lastSyncedUpdatedAt guard) — so "the
+// other id matches, but we don't have a per-field timestamp to compare" no longer needs solving;
+// whichever side pushed most recently wins outright, exactly like the rest of this sync system
+// already treats the payload as a whole. Everything else about the original add-only design stays
+// exactly as it was: a tombstoned id is still never revived (still checked first, before any
+// replace-or-add decision), and a task only this device knows about (not in the incoming snapshot
+// at all, no tombstone either) is still never dropped just for being absent — this only changes
+// what happens when BOTH sides already agree the same id exists.
+// Known residual tradeoff, accepted per Brody's own realistic usage (one person, rarely editing the
+// same task on both devices within the same few seconds): if a local edit on this device hasn't
+// finished its own debounced push yet (queueCloudSync's ~1.2s window) at the exact moment an older
+// incoming snapshot from the other device arrives, that fresh local edit could be overwritten. This
+// is the standard last-write-wins tradeoff every simple two-device sync makes without per-field
+// version vectors — accepted here because restoring "edits actually sync at all" matters more than
+// protecting against a race that requires editing the same task on both phones within ~1 second.
 function mergeIncomingTasks(localTasks,incomingTasks,deletedIds){
   const deleted=deletedIds||{};
   const isDeleted=id=>Object.prototype.hasOwnProperty.call(deleted,id);
-  const localIds=new Set((localTasks||[]).map(t=>t.id));
-  const merged=(localTasks||[]).filter(t=>!isDeleted(t.id));
+  const incomingById=new Map((incomingTasks||[]).filter(it=>it&&it.id!=null).map(it=>[it.id,it]));
+  const merged=(localTasks||[]).filter(t=>!isDeleted(t.id)).map(t=>incomingById.get(t.id)||t);
+  const localIds=new Set(merged.map(t=>t.id));
   (incomingTasks||[]).forEach(function(it){
     if(it && it.id!=null && !localIds.has(it.id) && !isDeleted(it.id)){
       merged.push(it);
