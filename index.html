@@ -2453,7 +2453,11 @@ function renderMobileTasksTab(){
     open=ordered.filter(t=>!plannerChecked(t,tk));
     doneList=ordered.filter(t=>plannerChecked(t,tk));
   } else if(mobileGrpFilter===UNGROUPED_GRP){
-    const base=tasks.filter(t=>!t.locked&&!t.isCategoryBlock&&!t.group);
+    // 2026-07-23 fix, per Brody (Dolo counterpart of the desktop "10 min walk" fix — see
+    // categoryPillsHTML's comment on Blanc for the full story): only exclude a locked task that
+    // actually has a category to live under elsewhere; a homeless locked task (no group, no
+    // category) needs to still show up SOMEWHERE, and this catch-all bucket is its only option.
+    const base=tasks.filter(t=>!(t.locked&&t.category)&&!t.isCategoryBlock&&!t.group);
     open=base.filter(t=>!t.done).sort(byDueTime);
     doneList=base.filter(t=>t.done).sort(byDueTime);
   } else if(mobileGrpFilter==='overdue'){
@@ -2463,8 +2467,10 @@ function renderMobileTasksTab(){
     doneList=[];
   } else {
     const isUncategorized=mobileCategoryFilter===CATEGORY_PILL_UNCATEGORIZED;
+    // 2026-07-23 fix: same "only exclude if it actually has a category" correction as desktop's
+    // catTabCategoryTasksHTML — a locked task whose category was removed still needs a home here.
     const base=isUncategorized
-      ? groupTasksBase(mobileGrpFilter).filter(t=>!t.locked)
+      ? groupTasksBase(mobileGrpFilter).filter(t=>!(t.locked&&t.category))
       : groupTasksBase(mobileGrpFilter).filter(t=>t.category===mobileCategoryFilter);
     open=base.filter(t=>!t.done).sort(byDueTime);
     doneList=base.filter(t=>t.done).sort(byDueTime);
@@ -7652,11 +7658,18 @@ function categoryPillsHTML(group){
   // both the guard below (groupAnyTasks — "does this group have anything at all") and the To Do
   // pill's own count/list (see catTabCategoryTasksHTML's isUncategorized branch) — they're still
   // fully visible and countable under their own category pill, untouched.
+  // 2026-07-23 fix, per Brody ("10 min walk" bug): that whole exclusion assumed a locked task
+  // ALWAYS has a category to live in — but Brody removed a locked task's category (to work around
+  // a separate display quirk with timed members of a category with no active schedule block), and
+  // it vanished from All Tasks completely: excluded from To Do for being locked, but with no
+  // category left to show under either — nowhere left to appear at all. Now only excludes a locked
+  // task that actually HAS a category (t.category) — one with none falls back into To Do same as
+  // any other homeless task, exactly like an unlocked one already would.
   // Counts here are OPEN (not-done) only — completed tasks get their own count via the separate
   // "Show N completed" toggle each list already has (completedTopToggleHTML), not folded into
   // these pill numbers, so a pill always reads as "how much is left," not a lifetime total.
   const groupAnyTasks=groupTasksBase(group).length>0;
-  const todoOpenCount=groupTasksBase(group).filter(t=>!t.locked&&!t.done).length;
+  const todoOpenCount=groupTasksBase(group).filter(t=>!(t.locked&&t.category)&&!t.done).length;
   // 2026-07-15, per Brody: renamed "Uncategorized" → "To Do" and changed what it means — it's no
   // longer just tasks with no category, it's now EVERY task in this group (categorized or not),
   // and it's the default pill a group opens to instead of the first category. A categorized task
@@ -7730,7 +7743,11 @@ function catTabCategoryTasksHTML(group,categoryName){
   // category, ready to be pulled into that category's schedule/checklist — they're excluded from
   // the "To Do" aggregate here so they don't sit around loose in the group's general list; still
   // fully visible under their own category pill (the else branch below is untouched).
-  const base=isUncategorized?groupTasksBase(group).filter(t=>!t.locked):groupTasksBase(group).filter(t=>t.category===categoryName);
+  // 2026-07-23 fix, per Brody: this assumed EVERY locked task has a category — but a locked task
+  // whose category got removed (see categoryPillsHTML's matching 2026-07-23 comment for the full
+  // "10 min walk" story) has nowhere else to appear once excluded here, so it vanished from All
+  // Tasks entirely. Only exclude a locked task that actually still HAS a category to live under.
+  const base=isUncategorized?groupTasksBase(group).filter(t=>!(t.locked&&t.category)):groupTasksBase(group).filter(t=>t.category===categoryName);
   // 2026-07-15, per Brody: overdue tasks used to be excluded here entirely (they lived in the
   // separate red Overdue bucket up top instead) — that bucket is gone now, so an overdue task just
   // stays in its normal category list, flagged with taskCardHTML's small red icon.
@@ -7867,7 +7884,10 @@ function renderAll(){
     // 2026-07-15, per Brody: locked tasks (the old pool items) excluded here too — they're not
     // really "open work" waiting on him, just standing inventory living inside their category
     // until pulled in, same reasoning as excluding them from the "To Do" pill (categoryPillsHTML).
-    const grpCount=tasks.filter(t=>t.group===c&&!t.isCategoryBlock&&!t.done&&!t.locked).length;
+    // 2026-07-23 fix: only exclude a locked task that actually HAS a category — see
+    // categoryPillsHTML's matching comment; a homeless locked task still needs to be counted
+    // somewhere, same as it now still shows up in the To Do pill itself.
+    const grpCount=tasks.filter(t=>t.group===c&&!t.isCategoryBlock&&!t.done&&!(t.locked&&t.category)).length;
     html+=`<button class="filter-btn grp-pill ${isActive?'active':''}" style="${pillStyle}" onclick="setGrp('${c}')" oncontextmenu="event.preventDefault();openGrpContextMenu(event,'${c}')" title="Right-click (two-finger click) to edit or add categories">${grpIconTag(c)}${c}${grpCount?` <span class="pill-count-badge">${grpCount}</span>`:''}</button>`;
   });
   {
@@ -10042,9 +10062,20 @@ function toggle(id){
 // non-recurring task. Once a day actually turns over (checked via the same lastQuoteDate-style
 // comparison updateNowLine already runs every 60s for the daily quote rollover — see its own
 // midnight-rollover line), any such task still sitting "done" from a previous day gets unscheduled
-// and un-checked, ready to be pulled into a category/time block again. Recurring locked tasks are
-// untouched here — they already advance their own due date and reset via toggle()'s recurring
-// branch above, same as any recurring task.
+// and un-checked, ready to be pulled into a category/time block again.
+// 2026-07-23 fix, per Brody ("Chest" bug): this used to leave recurring locked tasks out entirely,
+// on the assumption they'd always self-correct via toggle()'s own ~1.2s auto-advance timer. That
+// timer only runs in-session — if the tab got closed/refreshed, or a cloud-sync merge replaced the
+// tasks array, in that ~1.2s window, the timer never fires and the task is stuck "done" with a
+// stale due date FOREVER (no other safety net ever catches it, unlike a non-recurring locked task
+// which this function already rescues). Symptom Brody hit: a locked recurring Gym task ("Chest")
+// stayed done/absent from All Tasks' open list and the pull-in picker, well past the day it should
+// have reset and re-armed for its next occurrence. Now this end-of-day sweep is the reliable
+// backstop for EVERY locked task, recurring or not — the in-session timer is still what makes
+// checking a task feel instant/responsive, but this is what guarantees it actually recovers even
+// when that timer gets skipped. A recurring task's due date advances properly via
+// getCaughtUpDueDate (same helper toggle()'s own timer uses) instead of being cleared outright, so
+// it lands correctly on its real next occurrence instead of losing its schedule.
 function resetLockedTasksForNewDay(){
   const tk=todayKey();
   let changed=false;
@@ -10057,9 +10088,13 @@ function resetLockedTasksForNewDay(){
     // Missing completedAt on a done task is itself a sign of stale data, so it's treated as stale
     // here too, not left alone.
     const staleDone=t.done&&(!t.completedAt||dayKey(new Date(t.completedAt))!==tk);
-    if(t.locked && !isRecurringTask(t) && staleDone){
-      t.due=null;
-      t.scheduledTime=null;
+    if(t.locked && staleDone){
+      if(isRecurringTask(t)){
+        t.due=getCaughtUpDueDate(t);
+      } else {
+        t.due=null;
+        t.scheduledTime=null;
+      }
       t.done=false;
       t.completedAt=null;
       changed=true;
@@ -10462,10 +10497,16 @@ let pullTaskFilter=null; // null | 'locked' | 'favorites'
 // task (the auto row plus the newly-pulled one) — Brody's "Back" duplicate. This computes the set
 // of auto-member ids for whatever category block is currently open in the edit form so the picker
 // (and the toggle handler below) can treat them as already-included instead of pullable.
+// 2026-07-23 fix, per Brody: this used to always check against real today, even while the checklist
+// it's syncing with (renderFormSubtasks' autoMemberRowsHTML) had just switched to reflecting
+// whichever day is being viewed in the Day Planner (plannerDate) — see that function's own comment.
+// Left as todayKey() here, this would've disagreed with what the checklist actually shows the
+// moment Brody plans ahead to a future day, letting the same task get double-pulled again. Matches
+// plannerDate now so "already showing" always means "already showing on the day you're looking at."
 function currentEditAutoMemberIds(){
   const et=editId?tasks.find(x=>x.id===editId):null;
   if(!et||!et.isCategoryBlock||!et.categoryRef)return new Set();
-  return new Set(categoryAutoMemberTasksForBlock(et,todayKey()).map(mt=>mt.id));
+  return new Set(categoryAutoMemberTasksForBlock(et,plannerDate).map(mt=>mt.id));
 }
 let pullPickerAutoMemberIds=new Set();
 function openPullTaskPicker(){
@@ -10510,21 +10551,25 @@ function togglePullPickerGrp(grp){
 // 2026-07-10, per Brody: "checked" here now means "actually pulled in right now" (reads
 // formSubtasks directly), not a pending selection waiting on a "Pull selected" button — see
 // togglePullTaskPick, which commits immediately either way.
-// Which date this picker's pulls should be scoped to — the task-being-edited's own due date if it
-// has one (planning ahead onto a future day's checklist), otherwise today. Same fallback
-// togglePullTaskPick already used inline; hoisted out so the "selected" check below can share it.
+// Which date this picker's pulls should be scoped to — hoisted out so the "selected" check below
+// (pullTaskRowHTML) can share it with the actual pull action (togglePullTaskPick).
+// 2026-07-23 update, per Brody (the "Chest" bug follow-up): the checklist this picker feeds
+// (renderFormSubtasks) now shows whichever day is being viewed in the Day Planner (plannerDate),
+// not always real today — see that function's own comment. A pull still needs to land on
+// whatever day the checklist in front of Brody is actually showing, or it'd vanish immediately
+// (stamped for a day nothing's currently filtering by). This is NOT the same thing as restricting
+// which tasks he can browse/pull from here — the candidate list (renderPullTaskPickerBody) is
+// deliberately unfiltered by date, any task can be pulled in regardless of its own due date. This
+// only controls which day the resulting pull is filed under.
+// 2026-07-21 fix, folded in here: this used to read the f-due field's raw value as "the day this
+// pull is for." That seemed right for a plain one-off task with its own future/past due date, but
+// for any recurring task or category block (the actual, common case — Gym, Calls, etc.) the f-due
+// field is populated straight from t.due (see openForm), which is the recurring ANCHOR/pattern
+// date, not "whichever day is currently being viewed" — openForm never actually tracked the latter
+// for an existing task. plannerDate is exactly that "day currently being viewed" the app already
+// tracks everywhere else (calendar, sidebar), so it's the correct answer here too.
 function pullPickerForDate(){
-  // 2026-07-21 fix, per Brody: this used to read the f-due field's raw value as "the day this pull
-  // is for." That seemed right for a plain one-off task with its own future/past due date, but for
-  // any recurring task or category block (the actual, common case — Gym, Calls, etc.) the f-due
-  // field is populated straight from t.due (see openForm), which is the recurring ANCHOR/pattern
-  // date, not "today" and not "whichever day is currently being viewed" — openForm never actually
-  // tracks the latter for an existing task. So a freshly-pulled row got stamped with that stale
-  // anchor date, which almost never equals todayKey(), while the checklist itself
-  // (renderFormSubtasks) always filters against real todayKey() — guaranteed mismatch, so the pull
-  // silently never showed. Checklists are always "today's checklist" per Brody's own rule, so this
-  // now always scopes a pull to today, full stop — no more silent mismatch.
-  return todayKey();
+  return plannerDate;
 }
 function pullTaskRowHTML(t){
   // 2026-07-16 fix: an auto-member of the category block being edited is already showing in this
@@ -11246,12 +11291,25 @@ function renderFormSubtasks(){
   // (autoMemberDrag*) since reordering here means writing a categoryOrder value onto each real
   // task, not splicing formSubtasks. See categoryAutoMemberTasksForCategory's own comment for how
   // that order is read back everywhere else these tasks show up (calendar block, sidebar, etc.).
+  // 2026-07-23 fix, per Brody ("Chest" bug follow-up): this whole checklist section — auto-member
+  // rows below, plus visibleFormSubtasks/p.done just past them — used to always query real today
+  // (todayKey()), no matter which day was actually being viewed in the Day Planner (plannerDate).
+  // The calendar block itself (renderPlanner) already scopes to whichever day it's drawing via its
+  // own dk/dateKey — so skipping ahead to a future day showed that day's members correctly on the
+  // calendar, but opening the SAME category's Edit Task screen right after still silently showed
+  // today's lineup instead, making a real member (recurring on that future day, not today) look
+  // completely missing. Brody's own rule: "the checklist underneath a category should only show
+  // things for the actual day" — i.e. whichever day is being viewed, not always literal-today.
+  // Matches plannerDate now, same as the calendar. (Separately, the "Pull in an existing task"
+  // picker's browse/candidate list is intentionally NOT date-filtered — any task can be pulled in
+  // regardless of day; only pullPickerForDate, which decides which day a NEW pull is filed under,
+  // needed this same plannerDate treatment — see its own comment.)
   const autoMemberRowsHTML=(existingTask&&existingTask.isCategoryBlock&&existingTask.categoryRef)
-    ?categoryAutoMemberTasksForBlock(existingTask,todayKey()).map((mt,i)=>{
+    ?categoryAutoMemberTasksForBlock(existingTask,plannerDate).map((mt,i)=>{
       const safeId=String(mt.id).replace(/'/g,"\\'");
-      const done=plannerChecked(mt,todayKey());
+      const done=plannerChecked(mt,plannerDate);
       // 2026-07-15, per Brody: show a checklist item's own time next to its title here too.
-      const mtTime=effectiveTimeFor(mt,todayKey());
+      const mtTime=effectiveTimeFor(mt,plannerDate);
       const mtTimeTag=mtTime?`<span class="subtask-time-tag"><i class="fa fa-clock"></i>${fmtTimeTo12(mtTime)}</span>`:'';
       // 2026-07-21, per Brody: every checklist row's link icon is now the same blue, clickable icon
       // regardless of auto/manual — the grey vs. blue distinction is retired in favor of a small
@@ -11260,7 +11318,7 @@ function renderFormSubtasks(){
       // 2026-07-21, per Brody: made consistent with every other checklist row this session — the
       // pill itself now toggles on click (excluding the grip, the link icon, and the ×); opening the
       // task moved onto the link icon specifically, instead of the whole row.
-      return `<div class="checklist-row" style="cursor:pointer" title="Due or recurring today — click to toggle, drag to reorder" draggable="true"
+      return `<div class="checklist-row" style="cursor:pointer" title="Due or recurring on this day — click to toggle, drag to reorder" draggable="true"
         data-drag-kind="automember" data-drag-index="${i}"
         ondragstart="autoMemberDragStart(event,${i})" ondragover="autoMemberDragOver(event,${i})"
         ondragleave="autoMemberDragLeave(event)" ondrop="autoMemberDrop(event,${i})" ondragend="autoMemberDragEnd(event)"
@@ -11269,7 +11327,7 @@ function renderFormSubtasks(){
         <button type="button" class="subtask-check ${done?'done':''}" onclick="event.stopPropagation();toggleFormAutoMember('${safeId}')">${done?'<i class="fa fa-check"></i>':''}</button>
         <span class="subtask-text ${done?'done':''}">${escHtml(mt.title)}</span>
         ${mtTimeTag}
-        <button type="button" class="subtask-remove" title="Remove from today's checklist — never deletes the task itself" onclick="event.stopPropagation();removeFormAutoMember('${safeId}')">&times;</button>
+        <button type="button" class="subtask-remove" title="Remove from this day's checklist — never deletes the task itself" onclick="event.stopPropagation();removeFormAutoMember('${safeId}')">&times;</button>
       </div>`;
     }).join('')
     :'';
@@ -11278,18 +11336,22 @@ function renderFormSubtasks(){
   // today. Per Brody: "checklists anywhere across the board should only be ones I manually pulled
   // in for the day, are auto pulled in by a recurring due date, or I manually typed in" — the same
   // subtaskVisibleOnDate rule the calendar and the All Tasks quick-view already use (see
-  // renderAllCategoryDetailPanel's 2026-07-21 fix). `i` is still looked up against the REAL,
-  // unfiltered formSubtasks array (not the filtered display position) so every existing index-based
-  // handler below (checklistDragStart/Drop, removeFormSubtask, toggleFormSubtask,
-  // commitFormSubtaskEdit) keeps operating on the correct real row even when some are hidden.
-  const visibleFormSubtasks=formSubtasks.filter(s=>subtaskVisibleOnDate(s,todayKey()));
+  // renderAllCategoryDetailPanel's 2026-07-21 fix).
+  // 2026-07-23 update: "the day" here now means plannerDate (whichever day is being viewed), not
+  // always literal today — see the autoMemberRowsHTML comment just above for the full reasoning.
+  // `i` is still looked up against the REAL, unfiltered formSubtasks array (not the filtered display
+  // position) so every existing index-based handler below (checklistDragStart/Drop,
+  // removeFormSubtask, toggleFormSubtask, commitFormSubtaskEdit) keeps operating on the correct real
+  // row even when some are hidden.
+  const visibleFormSubtasks=formSubtasks.filter(s=>subtaskVisibleOnDate(s,plannerDate));
   wrap.innerHTML=visibleFormSubtasks.map(s=>{
     const i=formSubtasks.indexOf(s);
     const p=subRowParts(s);
     // Always date-scope "done" now, not just for a recurring category's own checklist — a
     // live-linked row's isCheckedOn read is correct for any parent (see subtaskDoneForDate's
     // 2026-07-21 fix), and a plain row's own doneDates/done fallback already handles the rest.
-    p.done=subtaskDoneForDate(s,todayKey(),existingTask);
+    // 2026-07-23: scoped to plannerDate (viewed day) to match visibleFormSubtasks just above.
+    p.done=subtaskDoneForDate(s,plannerDate,existingTask);
     // 2026-07-15, per Brody: this icon never actually opened the linked task — it was purely
     // decorative (just a "this is a live link" marker), no onclick at all, unlike the equivalent
     // icon on the auto-member rows just above (which already opens via openForm). Now it does too.
@@ -11424,7 +11486,10 @@ function addFormSubtask(raw){
   const grp=isEditingCategoryBlock?editingTask.categoryRef.group:(document.getElementById('f-group').value||GRPS[0]||'');
   const cat=isEditingCategoryBlock?editingTask.categoryRef.name:(document.getElementById('f-category').value.trim()||null);
   const newId=createOneOffChecklistTask(grp,cat,clean);
-  formSubtasks.push({id:'ref-'+newId+'-'+Date.now().toString(36)+Math.random().toString(36).slice(2,4),refTaskId:newId,pulledDate:todayKey()});
+  // 2026-07-23: stamped with plannerDate (the day being viewed), not always today — the checklist
+  // itself now filters by plannerDate (see renderFormSubtasks), so a today-only stamp would make a
+  // freshly-typed item vanish immediately while planning ahead on a future day.
+  formSubtasks.push({id:'ref-'+newId+'-'+Date.now().toString(36)+Math.random().toString(36).slice(2,4),refTaskId:newId,pulledDate:plannerDate});
   const input=document.getElementById('f-subtask-input');
   if(input)input.value='';
   // 2026-07-21, per Brody (Dolo "ghost duplicate" report): liveSaveTask() MUST run before
@@ -11465,7 +11530,9 @@ function toggleFormAutoMember(taskId){
 // effect on its recurring schedule otherwise. Same contract as removing a manual pull: the real task
 // is never touched, only today's occurrence disappears (see removeAutoMemberFromToday).
 function removeFormAutoMember(taskId){
-  removeAutoMemberFromToday(taskId,todayKey());
+  // 2026-07-23: scoped to plannerDate (the day actually being viewed), not always real today — see
+  // renderFormSubtasks' 2026-07-23 comment on why this checklist now follows the viewed day.
+  removeAutoMemberFromToday(taskId,plannerDate);
   renderFormSubtasks();
   renderAll3();
 }
@@ -11497,7 +11564,9 @@ function autoMemberDrop(e,i){
   if(from===null||from===i)return;
   const t=editId?tasks.find(x=>x.id===editId):null;
   if(!t||!(t.isCategoryBlock&&t.categoryRef))return;
-  const members=categoryAutoMemberTasksForBlock(t,todayKey());
+  // 2026-07-23: matches whatever day autoMemberRowsHTML actually rendered (plannerDate), so the
+  // reorder lands on the same list Brody is looking at, not a stale "today" copy.
+  const members=categoryAutoMemberTasksForBlock(t,plannerDate);
   const [moved]=members.splice(from,1);
   members.splice(i,0,moved);
   // Renumber every member 0..N-1 in the new order — writes straight onto each real task, which is
@@ -11583,7 +11652,8 @@ document.addEventListener('touchend',function(e){
   } else if(state.kind==='automember'){
     const t=editId?tasks.find(x=>x.id===editId):null;
     if(!t||!(t.isCategoryBlock&&t.categoryRef))return;
-    const members=categoryAutoMemberTasksForBlock(t,todayKey());
+    // 2026-07-23: same viewed-day scoping as the mouse-drag path just above (autoMemberDrop).
+    const members=categoryAutoMemberTasksForBlock(t,plannerDate);
     const [movedMt]=members.splice(state.fromIndex,1);
     members.splice(toIndex,0,movedMt);
     members.forEach((mt,idx)=>{ mt.categoryOrder=idx; });
