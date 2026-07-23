@@ -727,8 +727,6 @@
   .btn-save:hover{opacity:.85}
   .btn-modal-delete{background:rgba(231,76,60,0.12);color:#e74c3c;border:1px solid rgba(231,76,60,0.25);border-radius:8px;padding:10px 16px;font-size:15.5px;cursor:pointer;white-space:nowrap}
   .btn-modal-delete:hover{background:rgba(231,76,60,0.22)}
-  .btn-modal-duplicate{background:var(--blue-bg);color:var(--blue-text);border:1px solid var(--blue);border-radius:8px;padding:10px 16px;font-size:15.5px;cursor:pointer;white-space:nowrap}
-  .btn-modal-duplicate:hover{opacity:.85}
   select option{background:var(--bg3);color:var(--text)}
 
   /* ── Day Planner ── */
@@ -1504,7 +1502,6 @@
     <div id="f-overlap-nudge" class="overlap-nudge" style="display:none"></div>
     </div>
     <div class="modal-footer">
-      <button class="btn-modal-duplicate" id="modal-duplicate-btn" onclick="duplicateTimeBlock(editId)" style="display:none" title="Quickly drop another one of these on the calendar"><i class="fa fa-clone" style="margin-right:6px"></i>Duplicate as new block</button>
       <button class="btn-modal-delete" id="modal-delete-btn" onclick="deleteTask(editId)" style="display:none">× Delete</button>
     </div>
   </div>
@@ -7043,17 +7040,9 @@ function commitInlineRenameCategory(){
   renderAll3();
 }
 
-// 2026-07-06 — Brody found that Duplicate only ever showed up in the generic task-edit modal
-// (openForm), but clicking a recurring Category block from My Day/the calendar routes here instead
-// (openCategoryEditModal) — the one place he actually needs it for his "call blocks" use case. Same
-// underlying duplicateTimeBlock() logic (auto +1hr, carries forward not-yet-done checklist/pool
-// items), just reachable from this screen too now.
-function categoryEditDuplicateToday(){
-  const t=getCategoryScheduleTask(editCategoryGrp,editCategoryName);
-  if(!t)return;
-  closeCategoryEditModal();
-  duplicateTimeBlock(t.id);
-}
+// 2026-07-23: categoryEditDuplicateToday() (this modal's own "Duplicate" button, per the
+// 2026-07-06 note that used to sit here) removed along with the rest of "Duplicate as new block" —
+// see duplicateTimeBlock's own removal note above for why.
 // 2026-07-10 removal, per Brody: "Give this category a recurring schedule / Edit schedule pattern/
 // time / Remove schedule" (categoryScheduleSummaryHTML, categoryEditAddSchedule/EditSchedule/
 // RemoveSchedule) and the whole "Pull in an existing task" move-picker (toggleCategoryEditPull and
@@ -7254,153 +7243,22 @@ function poolDayItemsForTimeBlock(taskId){
 // was removed 2026-07-09 along with the Time Block checkbox it was gated behind — a task's pool
 // pulls (poolDayItemsForTimeBlock) still work exactly the same, they're just no longer browsable
 // from inside the edit form; pulling still happens from a category's own pool-pull UI.
-// Adds 60 minutes to a "HH:MM" time string, clamped to the calendar's own visible end hour
-// (END_H) so a duplicated block can never schedule itself somewhere it wouldn't actually be
-// visible/pickable — same clamp convention nearestTimeSlot() already uses. A block with no time
-// set at all just stays untimed (there's nothing to add an hour to).
-function addHourClampedToCalendar(time){
-  if(!time)return null;
-  const [h,m]=time.split(':').map(Number);
-  let nh=h+1, nm=m;
-  if(nh>END_H||(nh===END_H&&nm>0)){ nh=END_H; nm=0; }
-  return `${String(nh).padStart(2,'0')}:${String(nm).padStart(2,'0')}`;
-}
-// 2026-07-13, per Brody: duplicating a block used to always land exactly one hour after the
-// original, even if something else already sat there — starting from that same "one hour later"
-// time, this walks forward past whatever's already on the calendar that day until it finds a gap
-// big enough for the new block's own duration, so Duplicate lands somewhere actually open instead
-// of stacking on the first busy thing it hits. If the day's genuinely full with no gap left before
-// closing time, per Brody's call: stack it anyway at that original one-hour-later spot — the
-// calendar already handles overlapping blocks fine (lays them out side-by-side, plus the
-// overlap-nudge banner offering to nest under it), so nothing actually breaks.
-function findNextAvailableSlot(dateKey,fromTime,durationMin,excludeId){
-  if(!fromTime)return fromTime;
-  const toMin=hm=>{const [h,m]=hm.split(':').map(Number);return h*60+m;};
-  const toTime=min=>`${String(Math.floor(min/60)).padStart(2,'0')}:${String(min%60).padStart(2,'0')}`;
-  const dur=durationMin||30;
-  const dayEndMin=END_H*60;
-  const busy=tasks
-    .filter(o=>o.id!==excludeId && effectiveTimeFor(o,dateKey) && (o.due===dateKey||recurrenceMatchesDate(o,dateKey)))
-    .map(o=>{ const start=toMin(effectiveTimeFor(o,dateKey)); return {start,end:start+(o.duration||30)}; })
-    .sort((a,b)=>a.start-b.start);
-  let candidate=toMin(fromTime);
-  busy.forEach(b=>{ if(candidate<b.end && candidate+dur>b.start) candidate=b.end; });
-  if(candidate+dur>dayEndMin) return fromTime; // no gap left today — stack anyway, same spot as before
-  return toTime(candidate);
-}
-// Quick re-add (2026-07-01, Brody: "a quick way to drop another one on the calendar without
-// re-typing the name/group"). Creates a fresh, independent instance, due today. Opens straight
-// into the new copy's edit screen, same as pickCategoryForSlot already does, so Brody can
-// immediately adjust it wherever on the calendar he wants.
-// 2026-07-06 rework, per Brody's "call blocks" paragraph — three changes to make this genuinely
-// useful for pushing a block later in the day instead of just re-adding a blank one:
-//  1. auto-schedules the duplicate one hour after the original (addHourClampedToCalendar above)
-//     instead of leaving it with no time, so it lands straight onto the calendar with zero manual
-//     re-entry — it used to get stranded in the "no time set" tray until edited by hand.
-//  2. carries forward every NOT-YET-DONE checklist item from the original (both plain rows and
-//     live-linked task rows) — whatever's still open follows you to the new block; anything
-//     already checked off is left behind, exactly as asked.
-//  3. same treatment for pool-pulled items: every pool pull that isn't done yet today gets
-//     re-pulled onto the new block via pullBorrowedPoolItemForTimeBlock, using each pull's own
-//     ownerKey so it doesn't matter whether the item lives in this block's own group's pool or
-//     one borrowed from a shared pool elsewhere.
-// 2026-07-06 follow-up — Brody's real use case is recurring Categories ("call blocks"), not just
-// ad-hoc Time Blocks: "if I don't get them done in that initial time I can duplicate the call
-// block and they carry over with me." A Category's own recurring schedule task (isCategoryBlock) can
-// now duplicate the exact same way — the result is always a fresh, independent, non-recurring
-// Time Block (never a second copy of the recurring schedule task itself, which would just create a
-// duplicate daily block forever), seeded from whatever's still open in today's occurrence of that
-// category. A Category's pool pulls live under its own (group,name) key rather than a
-// per-task id, so poolSourceKey below picks whichever key actually holds today's pulls for
-// whichever kind of source this is.
-function duplicateTimeBlock(id){
-  const t=id?tasks.find(x=>x.id===id):null;
-  if(!t||!(t.scheduledTime||t.isCategoryBlock))return;
-  // 2026-07-16: moved up from further below so the still-open plain rows just under this can use it
-  // — see the createOneOffChecklistTask call, which needs to know which category to file under.
-  const fromCategory=!!(t.isCategoryBlock&&t.categoryRef);
-  // 2026-07-22 fix, per Brody ("duplicated Calls, it added 4 more tasks to the checklist that aren't
-  // on the existing/primary block"): this only ever checked "not done today," never whether the row
-  // was actually VISIBLE today (subtaskVisibleOnDate) — so a stale one-off pull whose pulledDate had
-  // already passed (correctly hidden in the real Calls block, just not yet physically swept out of
-  // its subtasks array by sweepStalePulledLinks' once-a-day pass) got silently resurrected into the
-  // duplicate anyway. Flagged as a known gap back in [[project_category_quickview_date_sync_fix]] and
-  // never actually hit until now — adding the same visibility check every other checklist read in the
-  // app already uses closes it.
-  const openSubtasks=(t.subtasks||[])
-    .filter(s=>subtaskVisibleOnDate(s,todayKey())&&!subtaskDoneForDate(s,todayKey(),t))
-    .map(s=>s.refTaskId
-      ? {id:'ref-'+s.refTaskId+'-'+Date.now().toString(36)+Math.random().toString(36).slice(2,4), refTaskId:s.refTaskId, pulledDate:todayKey()}
-      // 2026-07-16, per Brody: a plain row is never copied as inert text anymore — every typed
-      // checklist item is a real task now (see createOneOffChecklistTask's own comment), so carrying
-      // one forward into a duplicate means spinning up its own fresh one-off task too, filed under
-      // the same category the duplicate itself lands in, and linking it in as a one-off pull.
-      : (()=>{const newId=createOneOffChecklistTask(t.group,fromCategory?t.categoryRef.name:t.category,s.text);
-          return {id:'ref-'+newId+'-'+Date.now().toString(36)+Math.random().toString(36).slice(2,4), refTaskId:newId, pulledDate:todayKey()};})());
-  // 2026-07-13 fix, per Brody: a recurring Category's own block also shows "auto-member" rows —
-  // real locked/recurring tasks filed under that category, live-queried by categoryAutoMemberTasksForBlock,
-  // never actually stored in this block's own .subtasks (see renderFormSubtasks' autoMemberRowsHTML).
-  // Duplicate only ever carried over openSubtasks above (the manually pulled-in links), so any
-  // not-yet-done auto-member — like a recurring task still unchecked under "Calls" — silently
-  // vanished from view: the new duplicate isn't itself an isCategoryBlock task, so it can never
-  // show that live query, and the original block (now done) still passes isTaskPulledIntoAnyChecklist
-  // as false for it since it was never actually linked anywhere. Fix: bake today's still-open
-  // auto-members into the duplicate as real refTaskId links, exactly like pickCategoryForSlot
-  // already does for a fresh category pull. Once linked, isTaskPulledIntoAnyChecklist(mt.id) turns
-  // true, so the (done) original correctly stops showing it as a live auto-member too — no double-up.
-  const carryAutoMembers=(t.isCategoryBlock&&t.categoryRef)
-    ?categoryAutoMemberTasksForCategory(t.categoryRef.group,t.categoryRef.name,todayKey())
-      .filter(mt=>!plannerChecked(mt,todayKey()))
-      .map(mt=>({id:'ref-'+mt.id+'-'+Date.now().toString(36)+Math.random().toString(36).slice(2,4), refTaskId:mt.id, pulledDate:todayKey()}))
-    :[];
-  // 2026-07-06, per Brody: duplicating a recurring Category's own block used to always land with
-  // `category:null` — a brand-new, orphaned task sitting loose in the group instead of filed
-  // under the category it was actually spun off from. Filing it under the category (same field a
-  // normal member task uses) is what makes it show up nested in the category's own task list and
-  // under that category's group in All Tasks, same as any other task that belongs there. Plain
-  // ad-hoc Time Block duplicates (not from a Category) are untouched — `category` stays null exactly
-  // as before, since they were never filed under anything to begin with.
-  // `categoryDuplicate` is a small marker (not shown as text anywhere, per Brody: "doesn't need to
-  // be spelled out, waste of space") that only ever gets set here — used purely to show a tiny
-  // icon flag on the calendar tile and task card so it doesn't get mistaken for a plain, unrelated
-  // task that just happens to share the category. (fromCategory itself is now computed up top,
-  // before openSubtasks, since that carry-over needs it too.)
-  const newTask={
-    id:Date.now().toString()+Math.random().toString(36).slice(2,6),
-    title:t.title,
-    note:'',
-    starred:false,
-    group:t.group,
-    category:fromCategory?t.categoryRef.name:null,
-    categoryDuplicate:fromCategory?{group:t.categoryRef.group,name:t.categoryRef.name}:null,
-    due:todayKey(),
-    scheduledTime:findNextAvailableSlot(todayKey(),addHourClampedToCalendar(effectiveTimeFor(t,todayKey())),t.duration,t.id),
-    duration:t.duration,
-    recurrence:{type:'never',days:[]},
-    tags:[...(t.tags||[])],
-    subtasks:[...openSubtasks,...carryAutoMembers],
-    done:false,
-    completedAt:null,
-    completedDates:[],
-    createdAt:Date.now()
-  };
-  tasks.push(newTask);
-  const poolSourceKey=(t.isCategoryBlock&&t.categoryRef)?categoryKey(t.categoryRef.group,t.categoryRef.name):poolPullKeyForTimeBlock(t.id);
-  const oldPulls=CATEGORY_POOL_PULLS[poolSourceKey]||[];
-  oldPulls.filter(p=>!isPoolPullDoneToday(p)).forEach(p=>{
-    // A borrowed pull already carries its own ownerKey; a Category's pull from its OWN pool never
-    // does, so poolSourceKey itself (that category's own key) is the right fallback. A Time Block's
-    // pulls are always borrowed (it has no pool of its own), so this fallback never actually
-    // triggers for that case — p.ownerKey is always already set there.
-    const ownerKey=p.ownerKey||poolSourceKey;
-    const ownerGrp=ownerKey.slice(0,ownerKey.indexOf('::'));
-    const ownerName=categoryNameFromKey(ownerKey);
-    pullBorrowedPoolItemForTimeBlock(newTask.id,ownerGrp,ownerName,p.id);
-  });
-  save();
-  renderAll3();
-  openForm(newTask.id);
-}
+// 2026-07-23, per Brody: "Duplicate as new block" (and its two small helpers above,
+// addHourClampedToCalendar/findNextAvailableSlot) removed at Brody's request — the only real use
+// case was Calls overflowing into a second block, and he's replacing that with a plain second
+// "Calls 2" category on its own fixed recurring schedule instead (a genuinely simpler, more robust
+// fit for "I always want two call windows," vs. this feature's ad-hoc "spin up a one-off copy and
+// try to carry over what's unfinished" design, which is also where several past bugs lived — see
+// [[project_todo_app_review_pass_v200]] and the 2026-07-22 "4 extra tasks" fix that used to sit
+// here). The `categoryDuplicate` marker this used to stamp on a fresh duplicate is deliberately
+// LEFT alone everywhere else in the code (display badges, the exclusion checks in
+// categoryAutoMemberTasksForCategory/categoryMemberTasksDueOn) — nothing will ever set it again,
+// but any task Brody already duplicated before today still carries it in his saved data, and those
+// checks are what keep an old duplicate from double-counting/nesting oddly in its source category.
+// Removing this function is safe: nothing else in the app calls duplicateTimeBlock,
+// addHourClampedToCalendar, or findNextAvailableSlot anymore (the two "Duplicate" buttons that used
+// to trigger it — the main Edit Task modal footer and the category-edit delete-redirect modal — and
+// categoryEditDuplicateToday(), its thin wrapper, are removed too; see those spots' own history).
 // Phase 5 — the compact "set a repeat pattern" panel for one bank item, opened by its repeat
 // icon. Lives right under the bank list rather than inline in the pill itself (pills wrap and
 // stay small; a select + day-picker doesn't fit inside one). Same Never/Daily/Weekdays/
@@ -7474,15 +7332,10 @@ function renderCategoryEditModal(){
     // (a dead end he never used), and a "Schedule / Move" screen for recurrence/due-date/moving to
     // another group (redundant with just opening the category's own real task on the normal Edit
     // Task screen — see categoryEditOpenTaskDetails, "Open task details" below). What's left is just
-    // what genuinely only lives here: the name (click to rename), a slim info line, Duplicate (only
-    // meaningful from the calendar), Open task details, and Delete.
+    // what genuinely only lives here: the name (click to rename), a slim info line, Open task
+    // details, and Delete. (Duplicate removed 2026-07-23, see duplicateTimeBlock's own note.)
     const scheduleTask=getCategoryScheduleTask(editCategoryGrp,editCategoryName);
     const scheduleActive=!!(scheduleTask&&isRecurringTask(scheduleTask));
-    // 2026-07-06, per Brody: Duplicate only makes sense from the calendar (My Day/Weekly), where
-    // he's actually mid-day pushing a call block later — under All Tasks it was just clutter he
-    // never uses. currentView stays whatever it was when this modal was opened (opening it never
-    // navigates away from the underlying view), so this is a simple, accurate check.
-    const showDuplicate=scheduleActive&&currentView!=='all';
     const totalCount=categoryEditTotalCount();
     // 2026-07-15, per Brody: matches .badge-recur everywhere else a recurrence+time now shows,
     // instead of its own separate dim (var(--text3) icon / var(--text2) text) styling.
@@ -7495,7 +7348,6 @@ function renderCategoryEditModal(){
         ${recurBit}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${showDuplicate?`<button class="btn-save" style="flex:1;min-width:110px" onclick="categoryEditDuplicateToday()" title="Push a copy of today's still-open checklist/pool items onto a new block, one hour later"><i class="fa fa-clone" style="margin-right:6px"></i>Duplicate</button>`:''}
         <button class="btn-save" style="flex:1;min-width:110px" onclick="categoryEditOpenTaskDetails()" title="Set the recurring pattern, time, due date, or notes on the normal Edit Task screen"><i class="fa fa-pencil" style="margin-right:6px"></i>Open task details</button>
         <button class="confirm-yes" style="flex:1;min-width:110px" onclick="categoryEditShowDelete()"><i class="fa fa-trash" style="margin-right:6px"></i>Delete</button>
       </div>`;
@@ -11834,14 +11686,6 @@ function openForm(id,presetDate,presetTime,presetGrp,presetCategory,focusCheckli
   });
   updateRecurUI();
   renderFormSkippedDates();
-  // ── Duplicate button (reworked 2026-07-09) ──────────────────────────────────────────────────
-  // A "time block" is just any task with a scheduled time on the calendar — no separate flag or
-  // checkbox needed (per Brody: "the whole point of a time block is solely visual for my
-  // calendar"). Duplicate shows up for any task that's actually scheduled, or for a Category's
-  // own recurring schedule task, and spins off an independent one-off block seeded from today's
-  // still-open checklist/pool items (see duplicateTimeBlock).
-  const dupBtn=document.getElementById('modal-duplicate-btn');
-  if(dupBtn) dupBtn.style.display=(t&&(t.scheduledTime||t.isCategoryBlock))?'block':'none';
   renderFormSubtasks();
   document.getElementById('modal-title').textContent=id?'Edit task':'New task';
   document.getElementById('modal-delete-btn').style.display=id?'block':'none';
@@ -12019,13 +11863,6 @@ function liveSaveTask(){
     document.getElementById('modal-title').textContent='Edit task';
     document.getElementById('modal-delete-btn').style.display='block';
     document.getElementById('f-complete-btn').style.display='flex';
-    // The task just got its first permanent id — if it already has a scheduled time from the
-    // very first keystroke, the Duplicate button (which needs a real id to key off) can appear
-    // right away instead of waiting for a re-open.
-    if(data.scheduledTime){
-      const dupBtn=document.getElementById('modal-duplicate-btn');
-      if(dupBtn)dupBtn.style.display='block';
-    }
   }
   save();
   renderAll3();
@@ -12694,8 +12531,7 @@ document.addEventListener('mouseup', function(e) {
       // 2026-07-10, per Brody: a category block used to route to the separate category-editor popup
       // first, which got in the way of just rescheduling/editing it like anything else on the
       // calendar — the normal form already has everything that popup had (recurrence, due date,
-      // Duplicate, Delete — see modal-duplicate-btn's own `t.isCategoryBlock` check), so there's no
-      // reason to special-case it here anymore.
+      // Delete), so there's no reason to special-case it here anymore.
       wcDragState.el.classList.remove('is-dragging');
       const tid = wcDragState.taskId;
       wcDragState = null;
@@ -12819,9 +12655,9 @@ document.addEventListener('mouseup', function(e) {
     // Short click — opens the normal Edit Task form. 2026-07-10, per Brody, after noticing a
     // category block popped its own separate popup first here and in All Tasks alike ("Seems
     // redundant right?"): it was — that popup only ever had Duplicate/Open task details/Delete, all
-    // three already sitting on this same normal form (Duplicate and Delete both already keyed off
-    // isCategoryBlock, see modal-duplicate-btn and deleteTask's own redirect). A category block now
-    // opens directly by its own id, exactly like any other task.
+    // three already sitting on this same normal form (Delete already keyed off isCategoryBlock, see
+    // deleteTask's own redirect). A category block now opens directly by its own id, exactly like
+    // any other task.
     dragState.el.classList.remove('is-dragging');
     openForm(dragState.taskId, null, null, null, null, true);
   }
