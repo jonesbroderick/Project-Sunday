@@ -2436,56 +2436,45 @@ function renderMobileTasksTab(){
   // section ends and the due-today-no-time section begins, so the divider can be spliced in below.
   let todayOpenSplitIndex=null;
   if(mobileGrpFilter==='today'){
-    // 2026-07-23 rework, per Brody: this used to cluster by GROUP first (in GRPS order), matching
-    // desktop's OLD Today behavior — but desktop itself just changed to mirror the My Day sidebar's
-    // own timeline instead (see allTasksTodayActive's 2026-07-23 comment on Blanc): everything with
-    // an actual time today, flattened and sorted purely by that time regardless of group, then
-    // everything else due today with no time, grouped by pillar underneath. Mirrors that exact split
-    // here so both versions read the same, just condensed to one row per item instead of full cards.
+    // 2026-07-23 REWORK #2, per Brody (after "10 min walk" vanished entirely and a one-off
+    // "schedule entire category" block like Focus never showed up — both caused by Today running
+    // its own parallel "what's due today" ruleset that had quietly drifted from My Day's): "sync it
+    // to whatever you are running on my day... anything regarding due dates/times/durations should
+    // be synced completely across the board." Same three building blocks renderPlanner (My Day)
+    // uses — dayTasks/scheduled/unscheduled/virtualCategoryHostsForDate — evaluated for real
+    // todayKey() instead of plannerDate. See allTasksTodayActive's matching Blanc comment.
     const tk=todayKey();
     rowDateKey=tk;
-    const dayTasks=dayTaskList(tk).filter(t=>!isVisiblyPulledIntoChecklistOnDate(t.id,tk)&&!isSurfacedAsCategoryMemberToday(t,tk));
-    // 2026-07-23, per Brody: bring Dolo up to parity with Blanc/My Day for a category with NO
-    // active recurring schedule (Quick Wins-style) — its own backing task never matches
-    // dayTaskList's due/recurrence check on its own, so it never showed up here at all. Reuses
-    // categoriesDueTodayEntries (same helper Blanc's Today view now uses) for the "does this
-    // category have anything happening today" rule, wrapped so it can sort/split alongside real
-    // task rows below — skipped whenever the category's real backing task is ALREADY going to
-    // show up as its own row via dayTasks above (an active schedule/recurrence match), so nothing
-    // ever doubles up. See mobileCategoryEntryRowHTML for the row itself.
-    const virtualEntries=[];
-    GRPS.forEach(grp=>{
-      categoriesDueTodayEntries(grp).forEach(e=>{
-        const backingInDayTasks=dayTasks.some(t=>t.isCategoryBlock&&t.categoryRef&&t.categoryRef.group===grp&&t.categoryRef.name===e.name);
-        if(!backingInDayTasks) virtualEntries.push({_virtualCategory:true,entry:e,group:grp,id:'vcat-'+categoryKey(grp,e.name)});
-      });
-    });
-    const hasTime=x=>x._virtualCategory?!!x.entry.time:!!effectiveTimeFor(x,tk);
-    const minsOf=x=>{ const t=x._virtualCategory?x.entry.time:effectiveTimeFor(x,tk); const [h,m]=t.split(':').map(Number); return h*60+m; };
-    const starredOf=x=>x._virtualCategory?!!x.entry.starred:!!x.starred;
-    const isCategoryOf=x=>x._virtualCategory?true:!!x.isCategoryBlock;
-    const isDone=x=>x._virtualCategory?x.entry.done:plannerChecked(x,tk);
-    const all=[...dayTasks,...virtualEntries];
-    const scheduled=all.filter(hasTime).sort((a,b)=>{
-      const timeCmp=minsOf(a)-minsOf(b);
+    const dayTasksToday=tasks.filter(t=>t.due===tk||recurrenceMatchesDate(t,tk));
+    const scheduledToday=dayTasksToday.filter(t=>effectiveTimeFor(t,tk)&&!isVisiblyPulledIntoChecklistOnDate(t.id,tk)&&!isSurfacedAsCategoryMemberToday(t,tk)).sort((a,b)=>{
+      const timeCmp=effectiveTimeFor(a,tk).localeCompare(effectiveTimeFor(b,tk));
       if(timeCmp!==0)return timeCmp;
-      const prioCmp=(PRIORITY_RANK[starredOf(a)]??1)-(PRIORITY_RANK[starredOf(b)]??1);
+      const prioCmp=(PRIORITY_RANK[a.starred]??1)-(PRIORITY_RANK[b.starred]??1);
       if(prioCmp!==0)return prioCmp;
       return GRPS.indexOf(a.group)-GRPS.indexOf(b.group);
     });
+    const unscheduledToday=dayTasksToday.filter(t=>!effectiveTimeFor(t,tk)&&!isTaskPulledIntoAnyChecklist(t.id)&&!isAutoNestedMemberToday(t,tk)&&!t.isCategoryBlock);
+    // Virtual host categories (no active block today, but something's due — Quick Wins/Focus-with-
+    // no-time-style) tagged so the shared render dispatcher (mobileRowHTMLFor) knows to use
+    // mobileCategoryEntryRowHTML instead of mobileTaskRowHTML. A host never has its own time (if a
+    // category has an active time it's a real block, already in scheduledToday instead), so these
+    // only ever join the no-time grouping below.
+    const virtualHostsToday=virtualCategoryHostsForDate(tk).map(h=>({...h,_virtualCategory:true}));
+    const isDone=x=>x._virtualCategory?categoryTodayFullyDone(x.scheduleTask,x.poolItems,x.group,x.name):plannerChecked(x,tk);
+
     let noTimeOrdered=[];
     GRPS.forEach(grp=>{
-      const grpNoTime=all.filter(x=>x.group===grp&&!hasTime(x));
-      const categoryRows=grpNoTime.filter(isCategoryOf);
-      const individualRows=grpNoTime.filter(x=>!isCategoryOf(x)).sort(byDueTime);
-      noTimeOrdered.push(...categoryRows,...individualRows);
+      const hostsForGrp=virtualHostsToday.filter(h=>h.group===grp);
+      const indForGrp=unscheduledToday.filter(t=>t.group===grp).sort(byDueTime);
+      noTimeOrdered.push(...hostsForGrp,...indForGrp);
     });
-    const ungroupedNoTime=all.filter(x=>!x.group&&!hasTime(x)).sort(byDueTime);
-    noTimeOrdered.push(...ungroupedNoTime);
-    const ordered=[...scheduled,...noTimeOrdered];
+    const ungroupedInd=unscheduledToday.filter(t=>!t.group).sort(byDueTime);
+    noTimeOrdered.push(...ungroupedInd);
+
+    const ordered=[...scheduledToday,...noTimeOrdered];
     open=ordered.filter(x=>!isDone(x));
     doneList=ordered.filter(x=>isDone(x));
-    todayOpenSplitIndex=scheduled.filter(x=>!isDone(x)).length;
+    todayOpenSplitIndex=scheduledToday.filter(x=>!isDone(x)).length;
   } else if(mobileGrpFilter===UNGROUPED_GRP){
     // 2026-07-23 fix, per Brody (Dolo counterpart of the desktop "10 min walk" fix — see
     // categoryPillsHTML's comment on Blanc for the full story): only exclude a locked task that
@@ -2513,7 +2502,7 @@ function renderMobileTasksTab(){
   // Dispatches to mobileCategoryEntryRowHTML for a virtual no-schedule-category entry (see the
   // 'today' branch above), mobileTaskRowHTML for everything else — the "Today" ordered list mixes
   // both kinds, so every render call site below needs to tell them apart.
-  const mobileRowHTMLFor=x=>x&&x._virtualCategory?mobileCategoryEntryRowHTML(x.entry,rowDateKey):mobileTaskRowHTML(x,rowDateKey);
+  const mobileRowHTMLFor=x=>x&&x._virtualCategory?mobileCategoryEntryRowHTML(x,rowDateKey):mobileTaskRowHTML(x,rowDateKey);
   let listHTML;
   if(todayOpenSplitIndex!==null && todayOpenSplitIndex>0 && todayOpenSplitIndex<open.length){
     // Both a scheduled row and a no-time row exist — split the divider in between, same simple
@@ -2618,38 +2607,37 @@ function mobileTaskRowHTML(t,dateKey){
     ${checklistHTML}
   </div>`;
 }
-// 2026-07-23, per Brody: "make Dolo just like Blanc in that regard" — a category with NO active
-// recurring schedule (Quick Wins-style: only shows up because a task filed under it has an actual
-// due date today, or something's been typed straight into its checklist) never had a row here at
-// all — its own backing task doesn't match dayTaskList's due/recurrence check on its own, so it was
-// invisible on mobile even though the exact same category correctly shows as its own card on
-// Blanc's Today view and the My Day sidebar tray. This is the mobile row for that case, built from
-// the same `entry` shape categoriesDueTodayEntries already returns (grp/name/scheduleTask/items/
-// memberTasks) — same checkbox wiring, checklist sources, and expand/collapse idiom as
-// mobileTaskRowHTML's own category rows, just keyed by category (not task id) since there's no
-// single backing task guaranteed to be "the" row here.
-function mobileCategoryEntryRowHTML(entry,dateKey){
-  const {grp,name,scheduleTask,items,memberTasks,time,done}=entry;
+// 2026-07-23 REWORK #2, per Brody ("make Dolo just like Blanc in that regard," then "sync it to
+// whatever you're running on my day"): a category with NO active recurring schedule (Quick Wins-
+// style: only shows up because a task filed under it has an actual due date today, or a one-off
+// "schedule entire category" block like Focus with no time set) never had a row here at all. This
+// now consumes a `host` object straight from virtualCategoryHostsForDate — the EXACT same function
+// My Day's own "Due today · no time set" tray (virtualCategoryTrayCardHTML) already uses — instead
+// of the earlier categoriesDueTodayEntries-based `entry` shape, which had quietly drifted from My
+// Day's real rules (that's what caused the "10 min walk"/Focus bugs in the first place). A host
+// never has its own time — if a category has an actual scheduled time it's a REAL active block
+// instead, handled by mobileTaskRowHTML like any other category-block task — so this row always
+// lives in the no-time section.
+function mobileCategoryEntryRowHTML(host,dateKey){
+  const {group:grp,name,scheduleTask,members,poolItems,ownRows}=host;
   const cc=GRP_COLORS[grp]||'#888';
   const safeGrp=grp.replace(/'/g,"\\'");
   const safeName=name.replace(/'/g,"\\'");
   const key='vcat-'+categoryKey(grp,name);
   const safeKey=key.replace(/'/g,"\\'");
-  const timeStr=time?fmtTimeTo12(time):'';
+  const done=categoryTodayFullyDone(scheduleTask,poolItems,grp,name);
   const recurIconHTML=(scheduleTask&&isRecurringTask(scheduleTask))?'<i class="fa fa-refresh mobile-recur-icon" title="Recurring"></i>':'';
   const scheduleTaskId=scheduleTask?scheduleTask.id.replace(/'/g,"\\'"):null;
   const checkOnclick=scheduleTaskId?`toggle('${scheduleTaskId}')`:`toggleCategoryDoneToday('${safeGrp}','${safeName}')`;
   const checkHTML=`<button type="button" class="mobile-agenda-check${done?' done':''}" onclick="event.stopPropagation();${checkOnclick}">${done?'<i class="fa fa-check"></i>':''}</button>`;
-  const ownSubtasks=scheduleTask?(scheduleTask.subtasks||[]).filter(s=>subtaskVisibleOnDate(s,dateKey)):[];
-  const ownDoneCount=ownSubtasks.filter(s=>subtaskDoneForDate(s,dateKey,scheduleTask)).length;
-  const doneCount=ownDoneCount+items.filter(i=>i.done).length+memberTasks.filter(t=>plannerChecked(t,dateKey)).length;
-  const totalCount=ownSubtasks.length+items.length+memberTasks.length;
+  const doneCount=ownRows.filter(s=>subtaskDoneForDate(s,dateKey,scheduleTask)).length+poolItems.filter(i=>i.done).length+members.filter(t=>plannerChecked(t,dateKey)).length;
+  const totalCount=ownRows.length+poolItems.length+members.length;
   const tickerHTML=totalCount?`<span class="mobile-checklist-ticker">${doneCount}/${totalCount}</span>`:'';
   const isExpanded=mobileExpandedCategories.has(key);
   const expandBtnHTML=totalCount?`<button type="button" class="mobile-expand-btn" onclick="event.stopPropagation();toggleMobileCategoryExpand('${safeKey}')" title="${isExpanded?'Collapse':'Expand'} checklist"><i class="fa fa-chevron-${isExpanded?'down':'right'}"></i></button>`:'';
   let checklistHTML='';
   if(totalCount&&isExpanded){
-    const ownRowsHTML=ownSubtasks.map(s=>{
+    const ownRowsHTML=ownRows.map(s=>{
       const p=subRowParts(s); p.done=subtaskDoneForDate(s,dateKey,scheduleTask);
       const safeSId=String(s.id).replace(/'/g,"\\'");
       return `<div class="card-checklist-row" onclick="event.stopPropagation();toggleSubtaskDone('${scheduleTaskId}','${safeSId}','${dateKey}');renderMobile()">
@@ -2657,7 +2645,7 @@ function mobileCategoryEntryRowHTML(entry,dateKey){
         <span class="subtask-text${p.done?' done':''}">${escHtml(p.title)}</span>
       </div>`;
     }).join('');
-    const memberRowsHTML=memberTasks.map(mt=>{
+    const memberRowsHTML=members.map(mt=>{
       const checked=plannerChecked(mt,dateKey);
       const safeMtId=mt.id.replace(/'/g,"\\'");
       return `<div class="card-checklist-row" onclick="event.stopPropagation();toggle('${safeMtId}')">
@@ -2665,7 +2653,7 @@ function mobileCategoryEntryRowHTML(entry,dateKey){
         <span class="subtask-text${checked?' done':''}">${escHtml(mt.title)}</span>
       </div>`;
     }).join('');
-    const poolRowsHTML=items.map(item=>{
+    const poolRowsHTML=poolItems.map(item=>{
       const safeItemId=String(item.id).replace(/'/g,"\\'");
       return `<div class="card-checklist-row" onclick="event.stopPropagation();togglePoolPullDone('${safeGrp}','${safeName}','${safeItemId}');renderMobile()">
         <button type="button" class="subtask-check${item.done?' done':''}">${item.done?'<i class="fa fa-check"></i>':''}</button>
@@ -2680,7 +2668,6 @@ function mobileCategoryEntryRowHTML(entry,dateKey){
       <div class="mobile-agenda-main">
         <div class="mobile-agenda-title${done?' done':''}"><i class="fa fa-layer-group" style="font-size:11px;margin-right:5px;opacity:.55"></i>${grpIconTag(grp)}${escHtml(name)}${recurIconHTML}</div>
         <div class="mobile-task-meta">
-          ${timeStr?`<span class="mobile-task-due">${escHtml(timeStr)}</span>`:''}
           ${tickerHTML}
         </div>
       </div>
@@ -3184,9 +3171,17 @@ function categoryTodayActivity(grp,name){
   const tk=todayKey();
   const scheduleTask=getCategoryScheduleTask(grp,name);
   const scheduleToday=!!(scheduleTask&&isRecurringTask(scheduleTask)&&recurrenceMatchesDate(scheduleTask,tk));
+  // 2026-07-23 fix, per Brody: "Focus" wasn't actually made recurring — he used "Schedule entire
+  // category" to give it a one-off due date/time/duration for today with tasks pulled underneath,
+  // never touching recurrence at all. This function only ever checked isRecurringTask+pattern-match
+  // OR checklist links — a plain one-off due-today schedule (t.due===tk, recurrence still 'never')
+  // fell through both checks and never registered as "active today" anywhere that reads this
+  // (per-group Due Today tabs, the "All" pill, and the Today view before its 2026-07-23 rework to
+  // read straight off dayTasks/effectiveTimeFor like My Day does).
+  const dueToday=!!(scheduleTask&&scheduleTask.due===tk);
   const hasVisibleLinksToday=!!(scheduleTask&&(scheduleTask.subtasks||[]).some(s=>subtaskVisibleOnDate(s,tk)));
   const items=poolDayItemsForDate(grp,name,tk);
-  return {scheduleTask:(scheduleToday||hasVisibleLinksToday)?scheduleTask:null, items};
+  return {scheduleTask:(scheduleToday||dueToday||hasVisibleLinksToday)?scheduleTask:null, items};
 }
 // 2026-06-29: Brody checked off the Gym schedule task AND both of today's pool items (Shoulders,
 // Legs) — the Day Planner correctly showed all three as done/struck-through, but the Due Today
@@ -3262,32 +3257,6 @@ function categoriesDueTodaySplit(grp){
     else{ openCount++; openHtml+=categoryCardHTML(grp,name,scheduleTask,items,false,memberTasks); }
   });
   return {openHtml,doneHtml,doneCount,openCount};
-}
-// 2026-07-23, per Brody: the Today view (All Tasks) now mirrors the My Day sidebar's own timeline —
-// everything with an actual time today sorted flat by that time, mixed across every group, with a
-// visual break above everything else due today with no time (still grouped by pillar underneath,
-// same as before). Same exact "does this category have anything happening today" rule as
-// categoriesDueTodaySplit right above (its own comments have the full story on every exclusion) —
-// this sibling just returns each card tagged with its own effective time (or null) instead of two
-// pre-joined HTML blobs, so the Today branch can split/sort cards by time instead of always
-// bucketing them by group first. categoriesDueTodaySplit itself is untouched — allCategoriesDueTodaySplit
-// and the group-pill counter still use it exactly as before.
-function categoriesDueTodayEntries(grp){
-  const names=allCategoriesUsed(grp);
-  const tk=todayKey();
-  const entries=[];
-  names.forEach(name=>{
-    const {scheduleTask,items}=categoryTodayActivity(grp,name);
-    const memberTasks=categoryMemberTasksDueOnForCard(grp,name,tk);
-    if(!scheduleTask&&!items.length&&!memberTasks.length&&!isCategoryMarkedDoneToday(grp,name)) return;
-    const done=categoryTodayFullyDone(scheduleTask,items,grp,name);
-    const time=scheduleTask?effectiveTimeFor(scheduleTask,tk):null;
-    // Raw ingredients (grp/name/scheduleTask/items/memberTasks) are included alongside the
-    // pre-rendered desktop `html` so Dolo's mobile Today tab (see mobileCategoryEntryRowHTML) can
-    // build its own row style from the exact same data instead of re-deriving it a second time.
-    entries.push({grp,name,scheduleTask,items,memberTasks,time,done,starred:!!(scheduleTask&&scheduleTask.starred),html:categoryCardHTML(grp,name,scheduleTask,items,done,memberTasks)});
-  });
-  return entries;
 }
 // v121 fix: the "All" pill's Due Today bucket is a completely separate render path from the
 // per-group catTabDueTodayHTML above (it's the older stacked-bucket layout, built inside
@@ -7982,81 +7951,74 @@ function renderAll(){
   // their own card via allCategoriesDueTodaySplit(), same as every other Due Today view, so a category
   // doesn't show up twice (once as a bare "Gym" row, once as its proper category card).
   if(allTasksTodayActive){
-    // 2026-07-23 rework, per Brody: Today used to group everything by GROUP first, then time-sort
-    // only within each group — so a 7:45 AM item under Work could sit below an 11 AM item under
-    // Personal. Brody wants this to read exactly like the My Day sidebar's own timeline instead:
-    // everything that actually has a time today, flattened and sorted purely by that time regardless
-    // of group/category, in one continuous list at the top — then a visual break, then everything
-    // else due today with no time of its own, grouped by pillar underneath same as before. A task
-    // already nested inside a category's card (its own checklist, at that category's time) stays
-    // right there, wherever that card lands; this split only concerns cards/tasks that aren't
-    // nested anywhere and need a slot of their own — same idea My Day's own scheduled/unscheduled
-    // split (renderPlanner's `scheduled` array) already uses, just applied to full Today cards here
-    // instead of slim sidebar rows.
+    // 2026-07-23 REWORK #2, per Brody (after two Today-only bugs in a row — "10 min walk" vanishing
+    // entirely, and a one-off "schedule entire category" block like Focus never appearing — both
+    // caused by Today running its own parallel "what's active today" logic that had quietly drifted
+    // from My Day's): "sync it to whatever you are running on my day... anything regarding due
+    // dates/times/durations should be synced completely across the board." Today no longer computes
+    // its own due-today/nesting rules at all — it reads the EXACT same dayTasks/scheduled/unscheduled/
+    // virtualCategoryHostsForDate that renderPlanner (My Day) uses, just evaluated for real
+    // todayKey() instead of whatever day the planner happens to be viewing. Whatever shows, hides, or
+    // nests on My Day for today is now guaranteed to be what shows here too — one ruleset, not two.
     html+=`<div class="today-quickadd-bar"><i class="fa fa-plus today-quickadd-icon"></i><input type="text" id="today-quick-add-input" class="today-quickadd-input" placeholder="Add a task" autocomplete="off" onkeydown="handleTodayQuickAddKey(event)"></div>`;
     const tk=todayKey();
     let totalDoneToday=0;
-    const timedOpen=[],timedDone=[]; // {mins,starred,grpIdx,html} — merged+sorted across every group
-    const noTimeByGrp={};
-    GRPS.forEach(grp=>{
-      noTimeByGrp[grp]={open:'',done:''};
-      const grpIdx=GRPS.indexOf(grp);
-      categoriesDueTodayEntries(grp).forEach(e=>{
-        if(e.done) totalDoneToday++;
-        if(e.time){
-          const [h,m]=e.time.split(':').map(Number);
-          (e.done?timedDone:timedOpen).push({mins:h*60+m,starred:e.starred,grpIdx,html:e.html});
-        } else {
-          if(e.done) noTimeByGrp[grp].done+=e.html;
-          else noTimeByGrp[grp].open+=e.html;
-        }
-      });
-      const dueOrRecurring=dayTaskList(tk).filter(t=>!t.isCategoryBlock&&!t.category&&t.group===grp).sort(byDueTime);
-      dueOrRecurring.forEach(t=>{
-        const done=plannerChecked(t,tk);
-        if(done) totalDoneToday++;
-        const et=effectiveTimeFor(t,tk);
-        const cardHtml=taskCardHTML(t,true,false,null,true,true);
-        if(et){
-          const [h,m]=et.split(':').map(Number);
-          (done?timedDone:timedOpen).push({mins:h*60+m,starred:!!t.starred,grpIdx,html:cardHtml});
-        } else {
-          if(done) noTimeByGrp[grp].done+=cardHtml;
-          else noTimeByGrp[grp].open+=cardHtml;
-        }
-      });
-    });
-    // Group-less tasks (Today quick-adds not yet dragged onto a Category) fall in at the end of the
-    // no-time section, same flat treatment as before, tinted gray by taskCardHTML's own fallback —
-    // unless one of them actually has a time, in which case it joins the flat scheduled timeline
-    // like anything else, exactly as My Day's own sidebar already does.
-    const ungroupedToday=dayTaskList(tk).filter(t=>!t.isCategoryBlock&&!t.category&&!t.group).sort(byDueTime);
-    let ungroupedNoTimeOpen='',ungroupedNoTimeDone='';
-    ungroupedToday.forEach(t=>{
-      const done=plannerChecked(t,tk);
-      if(done) totalDoneToday++;
-      const et=effectiveTimeFor(t,tk);
-      const cardHtml=taskCardHTML(t,true,false,null,true,true);
-      if(et){
-        const [h,m]=et.split(':').map(Number);
-        (done?timedDone:timedOpen).push({mins:h*60+m,starred:!!t.starred,grpIdx:GRPS.length,html:cardHtml});
-      } else {
-        if(done) ungroupedNoTimeDone+=cardHtml;
-        else ungroupedNoTimeOpen+=cardHtml;
-      }
-    });
-    const byTimeSort=(a,b)=>{
-      if(a.mins!==b.mins) return a.mins-b.mins;
+
+    // Same three building blocks as renderPlanner's own My Day render — see that function's
+    // comments for the full "why" on each exclusion.
+    const dayTasksToday=tasks.filter(t=>t.due===tk||recurrenceMatchesDate(t,tk));
+    const scheduledToday=dayTasksToday.filter(t=>effectiveTimeFor(t,tk)&&!isVisiblyPulledIntoChecklistOnDate(t.id,tk)&&!isSurfacedAsCategoryMemberToday(t,tk)).sort((a,b)=>{
+      const timeCmp=effectiveTimeFor(a,tk).localeCompare(effectiveTimeFor(b,tk));
+      if(timeCmp!==0)return timeCmp;
       const prioCmp=(PRIORITY_RANK[a.starred]??1)-(PRIORITY_RANK[b.starred]??1);
-      if(prioCmp!==0) return prioCmp;
-      return a.grpIdx-b.grpIdx;
-    };
-    timedOpen.sort(byTimeSort);
-    timedDone.sort(byTimeSort);
-    const scheduledHtml=timedOpen.map(e=>e.html).join('')+(showCompleted?timedDone.map(e=>e.html).join(''):'');
+      if(prioCmp!==0)return prioCmp;
+      return GRPS.indexOf(a.group)-GRPS.indexOf(b.group);
+    });
+    const unscheduledToday=dayTasksToday.filter(t=>!effectiveTimeFor(t,tk)&&!isTaskPulledIntoAnyChecklist(t.id)&&!isAutoNestedMemberToday(t,tk)&&!t.isCategoryBlock);
+    const virtualHostsToday=virtualCategoryHostsForDate(tk);
+
+    // Renders one entry from `scheduledToday` or `unscheduledToday` — a real active category block
+    // (its own checklist nested via the exact same categoryAutoMemberTasksForBlock the calendar
+    // uses) or a plain task, exactly like taskCardHTML/categoryCardHTML already did.
+    const cardHtmlFor=t=>t.isCategoryBlock&&t.categoryRef
+      ? categoryCardHTML(t.categoryRef.group,t.categoryRef.name,t,poolDayItemsForDate(t.categoryRef.group,t.categoryRef.name,tk),plannerChecked(t,tk),categoryAutoMemberTasksForBlock(t,tk))
+      : taskCardHTML(t,true,false,null,true,true);
+
+    // Scheduled section: flat, sorted purely by time, mixed across every group — a category's real
+    // active block (Calls, a one-off scheduled block like Focus, whatever) and a plain timed task
+    // or an "escaped" timed category member (its own time, no active block to nest in) all land
+    // here side by side, exactly like the My Day sidebar.
+    const scheduledOpen=scheduledToday.filter(t=>!plannerChecked(t,tk));
+    const scheduledDone=scheduledToday.filter(t=>plannerChecked(t,tk));
+    totalDoneToday+=scheduledDone.length;
+    const scheduledHtml=scheduledOpen.map(cardHtmlFor).join('')+(showCompleted?scheduledDone.map(cardHtmlFor).join(''):'');
+
+    // No-time section: grouped by pillar same as before. Virtual host categories (no active block
+    // today, but something's due — Quick Wins-style) render first per group via the SAME
+    // categoryCardHTML real blocks use, just fed the host's own ingredients.
     let noTimeHtml='';
-    GRPS.forEach(grp=>{ noTimeHtml+=noTimeByGrp[grp].open+(showCompleted?noTimeByGrp[grp].done:''); });
-    noTimeHtml+=ungroupedNoTimeOpen+(showCompleted?ungroupedNoTimeDone:'');
+    GRPS.forEach(grp=>{
+      let openPart='',donePart='';
+      virtualHostsToday.filter(h=>h.group===grp).forEach(h=>{
+        const done=categoryTodayFullyDone(h.scheduleTask,h.poolItems,grp,h.name);
+        const cardHtml=categoryCardHTML(grp,h.name,h.scheduleTask,h.poolItems,done,h.members);
+        if(done){ totalDoneToday++; donePart+=cardHtml; } else { openPart+=cardHtml; }
+      });
+      unscheduledToday.filter(t=>t.group===grp).sort(byDueTime).forEach(t=>{
+        const done=plannerChecked(t,tk);
+        const cardHtml=cardHtmlFor(t);
+        if(done){ totalDoneToday++; donePart+=cardHtml; } else { openPart+=cardHtml; }
+      });
+      noTimeHtml+=openPart+(showCompleted?donePart:'');
+    });
+    let ungroupedOpen='',ungroupedDone='';
+    unscheduledToday.filter(t=>!t.group).sort(byDueTime).forEach(t=>{
+      const done=plannerChecked(t,tk);
+      const cardHtml=cardHtmlFor(t);
+      if(done){ totalDoneToday++; ungroupedDone+=cardHtml; } else { ungroupedOpen+=cardHtml; }
+    });
+    noTimeHtml+=ungroupedOpen+(showCompleted?ungroupedDone:'');
+
     html+=completedTopToggleHTML(totalDoneToday,0);
     if(!scheduledHtml && !noTimeHtml){
       html+=`<div class="empty">Nothing due today. 🎉</div>`;
