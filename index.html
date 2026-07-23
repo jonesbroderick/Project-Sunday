@@ -1914,6 +1914,7 @@ function handleSignOut(){
 function collectCloudSyncPayload(){
   return {
     tasks,
+    DELETED_TASK_IDS,
     GRP_LIST,
     CATEGORY_DEFS,
     CATEGORY_ORDER,
@@ -1944,21 +1945,40 @@ function queueCloudSync(){
   },1200);
 }
 // 2026-07-22 — the hard, deterministic guarantee behind the "no task ever vanishes from an incoming
-// sync" fix. This ADDS-ONLY: any task already on this device (by id) is kept exactly as-is, no matter
-// what an incoming snapshot says about it (missing entirely, edited, or even marked deleted elsewhere)
-// — the only thing an incoming snapshot can ever do is contribute a task this device doesn't already
-// have. A same-device delete still works normally: deleteTask removes the task from THIS device's own
-// `tasks` array first, and that already-shrunk array is what gets pushed to the cloud next, so it
-// stays gone permanently. What this closes off is a task disappearing because of what came DOWN from
-// the cloud — the exact failure mode that wiped out "Stretch," "Walk," and the "Focus" category.
-function mergeIncomingTasks(localTasks,incomingTasks){
+// sync" fix. This ADDS-ONLY BY ID: an incoming snapshot can never revive or silently reintroduce a task
+// this device doesn't want. What decides whether a task sticks around now has two parts, updated
+// 2026-07-23 to also support real cross-device deletes (see DELETED_TASK_IDS above and
+// mergeDeletedTaskIds below): a task already on this device is kept UNLESS its id has a tombstone
+// (deleted here, or reported deleted by the other device); an incoming task not already present here
+// gets added UNLESS its id has a tombstone. Either way, a tombstoned id can never come back — that's
+// what makes "delete on Dolo also deletes on Blanc" safe to allow at all, instead of the pure add-only
+// version of this function that shipped first (see the deleted-task-ids block above for why add-only
+// alone wasn't enough for Brody).
+function mergeIncomingTasks(localTasks,incomingTasks,deletedIds){
+  const deleted=deletedIds||{};
+  const isDeleted=id=>Object.prototype.hasOwnProperty.call(deleted,id);
   const localIds=new Set((localTasks||[]).map(t=>t.id));
-  const merged=(localTasks||[]).slice();
+  const merged=(localTasks||[]).filter(t=>!isDeleted(t.id));
   (incomingTasks||[]).forEach(function(it){
-    if(it && it.id!=null && !localIds.has(it.id)){
+    if(it && it.id!=null && !localIds.has(it.id) && !isDeleted(it.id)){
       merged.push(it);
       localIds.add(it.id);
     }
+  });
+  return merged;
+}
+// Combines this device's own tombstone map with an incoming one from the cloud, keeping the LATER
+// deletedAt timestamp for any id both sides know about (harmless either way, since a delete is a delete
+// regardless of which device's clock recorded it slightly differently — this is just for tie-breaking,
+// never used to decide whether something is deleted, only when). An id present on only one side is kept
+// as-is. This is monotonic and safe to run every time a sync payload arrives — tombstones only ever
+// accumulate or get their timestamp refined, never removed here (see pruneDeletedTaskIds for the one
+// place old ones eventually drop off).
+function mergeDeletedTaskIds(localDeleted,incomingDeleted){
+  const merged=Object.assign({},localDeleted||{});
+  Object.keys(incomingDeleted||{}).forEach(function(id){
+    const incomingTs=incomingDeleted[id];
+    if(!merged[id]||incomingTs>merged[id])merged[id]=incomingTs;
   });
   return merged;
 }
@@ -1986,17 +2006,34 @@ function applyCloudSyncPayload(data){
   // separate device/session whose own local copy was behind, syncing its outdated state up and
   // clobbering the real one (see this file's own writeup for the full incident). No timestamp check
   // can be fully trusted here, since a stale document can still carry its own internally-consistent
-  // updatedAt. So instead of trusting a whole-array replace at all, incoming task data is now MERGED
-  // by id rather than swapped in: a task already on this device is never removed or reverted just
-  // because it's missing from (or different in) an incoming snapshot — incoming data can only ever
-  // ADD a task this device doesn't already have. Real, same-device deletes still work completely
-  // normally (deleteTask/confirmDelete remove it from THIS device's own `tasks` and that removal is
-  // what gets pushed up next) — this only closes the door on a task vanishing because of what came
-  // DOWN from the cloud. Trade-off, worth remembering: deleting a task on a DIFFERENT device no longer
-  // auto-removes it here — it'll sit as a stray duplicate until deleted on this device too. Given the
-  // stakes Brody described, an occasional manual duplicate cleanup is a far better failure mode than
-  // silent, untraceable data loss.
-  if(Array.isArray(data.tasks))tasks=mergeIncomingTasks(tasks,data.tasks);
+  // updatedAt. So instead of trusting a whole-array replace at all, incoming task data is MERGED by id
+  // rather than swapped in: a task already on this device is never silently dropped just because it's
+  // missing from an incoming snapshot.
+  //
+  // 2026-07-23 update, per Brody: he wants real deletes to actually sync too — checking off or
+  // deleting on Dolo (his phone, which "sits stale... unless I am specifically doing updates on it")
+  // should be reflected on Blanc, and vice versa, without the previous version's trade-off of leaving
+  // stray duplicates behind. The pure add-only merge above couldn't do that (it had no way to tell "not
+  // here yet" apart from "deleted elsewhere"), so it's now backed by DELETED_TASK_IDS, a small
+  // id->deletedAt tombstone map synced right alongside `tasks` (see removeTasksByIds and
+  // mergeDeletedTaskIds above). Tombstones from both sides are merged FIRST, then used to filter the
+  // task merge: a task is only ever removed by an incoming sync if ITS OWN id has a tombstone somewhere
+  // — never by simply being absent from a snapshot, which is what caused the original data-loss
+  // incidents. This is what makes it safe to allow deletes to propagate at all.
+  if(data.DELETED_TASK_IDS&&typeof data.DELETED_TASK_IDS==='object'){
+    DELETED_TASK_IDS=mergeDeletedTaskIds(DELETED_TASK_IDS,data.DELETED_TASK_IDS);
+  }
+  if(Array.isArray(data.tasks)){
+    const beforeIds=new Set(tasks.map(t=>t.id));
+    tasks=mergeIncomingTasks(tasks,data.tasks,DELETED_TASK_IDS);
+    const afterIds=new Set(tasks.map(t=>t.id));
+    // Anything that just got removed by a tombstone (not by an ordinary same-device delete, which
+    // already swept its own dangling links via removeTasksByIds) needs the same dangling-link cleanup
+    // so another task's checklist doesn't end up showing a "(linked task was deleted)" zombie row.
+    const removedByTombstone=new Set([...beforeIds].filter(id=>!afterIds.has(id)));
+    if(removedByTombstone.size)sweepDanglingSubtaskLinks(removedByTombstone);
+  }
+  pruneDeletedTaskIds();
   if(data.updatedAt)lastSyncedUpdatedAt=data.updatedAt;
   cloudSyncApplyingRemote=true;
   // migrateLegacyDatelessPlainRows(); // HALTED 2026-07-22 — this migration turned out to be far
@@ -2018,6 +2055,7 @@ function applyCloudSyncPayload(data){
   if(data.CATEGORY_POOL_COMPLETION_LOG)CATEGORY_POOL_COMPLETION_LOG=data.CATEGORY_POOL_COMPLETION_LOG;
   if(data.SHARED_POOLS)SHARED_POOLS=data.SHARED_POOLS;
   localStorage.setItem('brody_tasks_v2',JSON.stringify(tasks));
+  localStorage.setItem('brody_deleted_task_ids',JSON.stringify(DELETED_TASK_IDS));
   localStorage.setItem('brody_groups',JSON.stringify(GRP_LIST));
   localStorage.setItem('brody_category_defs',JSON.stringify(CATEGORY_DEFS));
   localStorage.setItem('brody_category_order',JSON.stringify(CATEGORY_ORDER));
@@ -2904,9 +2942,7 @@ function deleteCategoryByIdx(i){
     // dangling with no CATEGORY_DEFS entry pointing at it anymore.
     const backing=getCategoryScheduleTask(categoriesModalGrp,name);
     if(backing){
-      const removedIds=new Set([backing.id]);
-      tasks=tasks.filter(t=>t.id!==backing.id);
-      sweepDanglingSubtaskLinks(removedIds);
+      removeTasksByIds(new Set([backing.id]));
     }
     if(CATEGORY_DEFS[categoriesModalGrp]) CATEGORY_DEFS[categoriesModalGrp]=CATEGORY_DEFS[categoriesModalGrp].filter(n=>n!==name);
     expandedCategories.delete(categoryKey(categoriesModalGrp,name));
@@ -3478,6 +3514,43 @@ const START_H = 6;  // 6 AM
 const END_H = 20;   // 8 PM
 
 let tasks = JSON.parse(localStorage.getItem('brody_tasks_v2') || '[]');
+// 2026-07-23 — true two-way delete sync (see mergeIncomingTasks' own comment for the add-only half of
+// this story). Plain object mapping a deleted task's id -> the timestamp it was deleted, kept forever
+// (well, pruned after DELETED_TASK_RETENTION_MS — see pruneDeletedTaskIds) so that a delete made on one
+// device eventually reaches every other device, including one that's been sitting stale/backgrounded
+// for a while and only reconnects later (Brody's own description of how Dolo, his phone, typically
+// behaves — sitting on an old snapshot until he actively opens it again). Synced as its own field
+// alongside `tasks`, same mechanism as everything else in collectCloudSyncPayload.
+let DELETED_TASK_IDS = JSON.parse(localStorage.getItem('brody_deleted_task_ids') || '{}');
+// However long a device could plausibly stay closed/backgrounded before reconnecting and still needs
+// to learn about a delete that happened elsewhere. 90 days is generous on purpose — the cost of keeping
+// a tombstone too long is a few bytes of JSON; the cost of pruning it too early is a deleted task
+// silently coming back from a long-stale device, which is exactly the class of bug this whole feature
+// exists to prevent. Task ids are always freshly generated (Date.now()+random), never reused, so an
+// old tombstone can never wrongly catch a genuinely new, unrelated task.
+const DELETED_TASK_RETENTION_MS = 90*24*60*60*1000;
+function pruneDeletedTaskIds(){
+  const cutoff=Date.now()-DELETED_TASK_RETENTION_MS;
+  let changed=false;
+  Object.keys(DELETED_TASK_IDS).forEach(id=>{
+    if(DELETED_TASK_IDS[id]<cutoff){ delete DELETED_TASK_IDS[id]; changed=true; }
+  });
+  return changed;
+}
+// Single, shared path for every real task deletion in the app (single delete, bulk delete, category
+// delete, cleanup-tool delete, group delete's backing-task cleanup, etc.) — replaces each site's own
+// `tasks=tasks.filter(...)` + `sweepDanglingSubtaskLinks(...)` pair. Centralizing this one spot is what
+// makes the tombstone guarantee actually reliable: any future deletion path added to the app gets
+// cross-device delete sync for free just by calling this, instead of needing to remember to record a
+// tombstone by hand every time. Does NOT call save() itself — callers already do that once, alongside
+// whatever else they need to persist in the same batch (matches every existing call site's own pattern).
+function removeTasksByIds(idSet){
+  if(!idSet||!idSet.size)return;
+  const now=Date.now();
+  idSet.forEach(id=>{ DELETED_TASK_IDS[id]=now; });
+  tasks=tasks.filter(t=>!idSet.has(t.id));
+  sweepDanglingSubtaskLinks(idSet);
+}
 // One-time migration (2026-07-09, Phase 1 of the Group/Category rename): everything saved to disk
 // before today still uses the OLD field names — the top-level pillar was stored as `.category` and
 // the nested grouping was stored as `.section` (with `.sectionRef:{category,name}` on backing
@@ -3760,7 +3833,7 @@ function cleanupSelectNone(){
 }
 function deleteCleanupSelected(){
   if(!cleanupSelectedIds.size)return;
-  tasks=tasks.filter(t=>!cleanupSelectedIds.has(t.id));
+  removeTasksByIds(cleanupSelectedIds);
   cleanupSelectedIds=new Set();
   save();
   renderCleanupList();
@@ -5118,7 +5191,7 @@ function handleQuickAddCatTaskKey(event,grp,catName){
 // lastSyncedUpdatedAt (see its own comment) can survive a page reload, not just this same session —
 // otherwise a not-yet-cloud-synced edit made right before a refresh had no defense against an older
 // incoming Firestore snapshot silently overwriting it on the next load.
-function save(){localStorage.setItem('brody_tasks_v2',JSON.stringify(tasks));localStorage.setItem('brody_last_local_update',String(Date.now()));queueCloudSync();}
+function save(){pruneDeletedTaskIds();localStorage.setItem('brody_tasks_v2',JSON.stringify(tasks));localStorage.setItem('brody_deleted_task_ids',JSON.stringify(DELETED_TASK_IDS));localStorage.setItem('brody_last_local_update',String(Date.now()));queueCloudSync();}
 // Use local date parts (not UTC) so dates always match the date picker value
 function todayKey(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
 function dayKey(d){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
@@ -7499,14 +7572,13 @@ function confirmDeleteCategory(deleteTasks){
   const removedIds=new Set();
   if(deleteTasks){
     tasks.filter(t=>t.group===grp && t.category===name && !t.done).forEach(t=>removedIds.add(t.id));
-    tasks=tasks.filter(t=>!(t.group===grp && t.category===name && !t.done));
   }
-  tasks.forEach(t=>{ if(t.group===grp && t.category===name) t.category=null; });
   // The category itself is going away either way, so its recurring schedule (if any) can't point
   // anywhere meaningful anymore — clean it up regardless of what happens to the member tasks above.
   const scheduleTask=getCategoryScheduleTask(grp,name);
-  if(scheduleTask){ removedIds.add(scheduleTask.id); tasks=tasks.filter(t=>t.id!==scheduleTask.id); }
-  if(removedIds.size) sweepDanglingSubtaskLinks(removedIds);
+  if(scheduleTask)removedIds.add(scheduleTask.id);
+  if(removedIds.size) removeTasksByIds(removedIds);
+  tasks.forEach(t=>{ if(t.group===grp && t.category===name) t.category=null; });
   if(CATEGORY_DEFS[grp]) CATEGORY_DEFS[grp]=CATEGORY_DEFS[grp].filter(n=>n!==name);
   expandedCategories.delete(categoryKey(grp,name));
   // Pool feature Phase 3: deleting the category retires its pool bank and clears any pulled items.
@@ -10987,8 +11059,7 @@ function confirmDelete(){
   if(pendingBulkDeleteIds){
     const idSet=new Set(pendingBulkDeleteIds);
     const wasEditingSelected = editId && idSet.has(editId);
-    tasks=tasks.filter(t=>!idSet.has(t.id));
-    sweepDanglingSubtaskLinks(idSet);
+    removeTasksByIds(idSet);
     pendingBulkDeleteIds=null;
     document.getElementById('confirm-modal').style.display='none';
     save();
@@ -10999,8 +11070,7 @@ function confirmDelete(){
   }
   if(!pendingDeleteId)return;
   const wasEditingThis = pendingDeleteId===editId; // only close the task screen if we just deleted the task open in it
-  tasks=tasks.filter(t=>t.id!==pendingDeleteId);
-  sweepDanglingSubtaskLinks(new Set([pendingDeleteId]));
+  removeTasksByIds(new Set([pendingDeleteId]));
   pendingDeleteId=null;
   document.getElementById('confirm-modal').style.display='none';
   save();renderAll3();
@@ -11967,7 +12037,7 @@ function checkSlotQuickEntryRevert(){
   const wasEditId=editId;
   closeForm();
   if(wasEditId){
-    tasks=tasks.filter(t=>t.id!==wasEditId);
+    removeTasksByIds(new Set([wasEditId]));
     save();
     renderAll3();
   }
