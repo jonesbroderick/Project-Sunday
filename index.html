@@ -8520,8 +8520,19 @@ function categoryHasActiveBlockOnDate(group,name,dateKey){
 // pulled-in link. Checking real membership (not just "does it have a category set") guards against
 // an orphaned/deleted category or a task that's actually pulled into some OTHER checklist instead —
 // either of those should keep its own block rather than silently vanish from the calendar.
+// 2026-07-23 fix, per Brody ("10 min walk" under Habits): the "whether or not it has its own
+// scheduled time" part above was too broad. A category WITH an active schedule block (Calls, etc.)
+// genuinely has nowhere else on the calendar for a timed member to go but nested inside that real
+// block — that's the actual Chiro-bug case this rule was written for, still fully honored below. But
+// a category with NO active block (Habits-style) has no calendar presence of its own at all — its
+// members only ever land in the flat "no time set" virtual host card, which ignores each member's
+// own time entirely. A member that DOES have its own specific time genuinely belongs on the
+// calendar at that time like any other Time Block, so it no longer counts as "surfaced elsewhere"
+// in that case — see virtualCategoryHostsForDate's matching fix so it isn't ALSO shown nested in
+// the virtual host card once it stands on its own.
 function isSurfacedAsCategoryMemberToday(mt,dateKey){
   if(!mt||mt.isCategoryBlock||!mt.category)return false;
+  if(effectiveTimeFor(mt,dateKey)&&!categoryHasActiveBlockOnDate(mt.group,mt.category,dateKey))return false;
   return categoryAutoMemberTasksForCategory(mt.group,mt.category,dateKey).some(x=>x.id===mt.id);
 }
 // 2026-07-06, follow-up per Brody: "if there is a task under chores that is scheduled for today
@@ -8543,7 +8554,14 @@ function virtualCategoryHostsForDate(dateKey){
   GRPS.forEach(grp=>{
     (CATEGORY_DEFS[grp]||[]).forEach(name=>{
       if(categoryHasActiveBlockOnDate(grp,name,dateKey))return;
-      const members=categoryAutoMemberTasksForCategory(grp,name,dateKey);
+      // 2026-07-23 fix: a member with its own time now stands on its own as a real top-level
+      // calendar block (see isSurfacedAsCategoryMemberToday's matching fix) instead of nesting
+      // here — excluded so it isn't shown a second time inside this card too. Untimed members
+      // (and pool items, which have no time concept) are unaffected, still nested here exactly as
+      // before. Note: categoryAutoMemberTasksForCategory itself (used app-wide for All Tasks
+      // counting/quick-view/checklist tabs) is untouched — a member still fully counts under its
+      // category everywhere else, this filter only affects what this one calendar-facing card shows.
+      const members=categoryAutoMemberTasksForCategory(grp,name,dateKey).filter(mt=>!effectiveTimeFor(mt,dateKey));
       const poolItems=poolDayItemsForDate(grp,name,dateKey);
       if(members.length||poolItems.length)hosts.push({group:grp,name,members,poolItems});
     });
@@ -8731,7 +8749,13 @@ function virtualCategoryTrayCardHTML(group,name,members,poolItems,dateKey){
   const vKey='vcat-'+group+'-'+name;
   const vChildCount=members.length+poolItems.length;
   const vExpanded=vChildCount&&plannerChecklistExpanded.has(vKey);
-  const timedChecklistReminderIcon=categoryHasTimedChecklistItemToday(group,name,dateKey)?`<i class="fa fa-clock timed-checklist-reminder" title="One of this category's checklist items has its own scheduled time"></i>`:'';
+  // 2026-07-23 fix: this used to re-query categoryHasTimedChecklistItemToday (the FULL, unfiltered
+  // member list) — but as of virtualCategoryHostsForDate's matching fix, a timed member is never
+  // actually included in THIS card's own `members` anymore (it stands on its own as a real
+  // calendar block instead), so that would've shown a "something in here has a time" hint pointing
+  // at nothing. Derived from this card's own (already-filtered) members instead, which is now
+  // always false here — left as a real check rather than hardcoded away in case that ever changes.
+  const timedChecklistReminderIcon=members.some(mt=>effectiveTimeFor(mt,dateKey))?`<i class="fa fa-clock timed-checklist-reminder" title="One of this category's checklist items has its own scheduled time"></i>`:'';
   return `<div class="tray-chip tray-chip-today tray-chip-category" onclick="handleVirtualCategoryCardClick('${safeGrp}','${safeName}')" style="cursor:pointer;background:${cc}1f;border-left:3px solid ${cc}">
     <span class="tray-chip-dot" style="background:${cc}"></span>
     <span class="tray-chip-title"><i class="fa fa-layer-group" style="margin-right:6px;opacity:.6"></i>${escHtml(name)}${timedChecklistReminderIcon}</span>
