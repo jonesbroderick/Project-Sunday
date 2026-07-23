@@ -3250,7 +3250,7 @@ function categoriesDueTodaySplit(grp){
     // pool items already are. Uses the shared categoryMemberTasksDueOn helper (see its comment) so
     // this count always matches what the quick-view panel actually shows — no more of two different
     // renderers disagreeing about which tasks belong to a category today.
-    const memberTasks=categoryMemberTasksDueOn(grp,name,tk);
+    const memberTasks=categoryMemberTasksDueOnForCard(grp,name,tk);
     // 2026-07-06: marking a no-schedule category done sweeps its open pool pulls back to the pool
     // (sweepUndonePoolPullsForCategory), which can leave items.length at 0 right after — without this
     // extra check that would make the card vanish entirely the moment it's checked off, which is
@@ -3278,7 +3278,7 @@ function categoriesDueTodayEntries(grp){
   const entries=[];
   names.forEach(name=>{
     const {scheduleTask,items}=categoryTodayActivity(grp,name);
-    const memberTasks=categoryMemberTasksDueOn(grp,name,tk);
+    const memberTasks=categoryMemberTasksDueOnForCard(grp,name,tk);
     if(!scheduleTask&&!items.length&&!memberTasks.length&&!isCategoryMarkedDoneToday(grp,name)) return;
     const done=categoryTodayFullyDone(scheduleTask,items,grp,name);
     const time=scheduleTask?effectiveTimeFor(scheduleTask,tk):null;
@@ -4442,7 +4442,7 @@ function renderAllCategoryDetailPanel(emptyEl,contentEl){
   // — same category, same "0/2", two completely different halves of the picture depending which side
   // you looked at. categoryMemberTasksDueOn already excludes anything pulled into a real checklist
   // (ownRowsHTML's territory), so there's no risk of double-listing a task here.
-  const memberRows=categoryMemberTasksDueOn(grp,name,todayKey());
+  const memberRows=categoryMemberTasksDueOnForCard(grp,name,todayKey());
   const memberRowsHTML=memberRows.map(t=>{
     const checked=plannerChecked(t,todayKey());
     const safeId=t.id.replace(/'/g,"\\'");
@@ -8724,6 +8724,21 @@ function categoryMemberTasksDueOn(group,name,dateKey){
     // Calls category pill/tab. Same fix, same reasoning, just the other renderer.
     !(t.categoryDuplicate&&t.categoryDuplicate.group===group&&t.categoryDuplicate.name===name)
   ).sort(byDueTime);
+}
+// 2026-07-23 fix, per Brody (real screenshot: "10 min walk" nested inside Habits' Today card even
+// though it correctly stands on its own on the calendar and My Day sidebar): categoryMemberTasksDueOn
+// above never got the overlap-based "escaped member" exclusion categoryAutoMemberTasksForBlock
+// already has (see that function's own 2026-07-23 comment) — a timed member whose time doesn't
+// overlap this category's active schedule block shows as its OWN independent block everywhere else,
+// but this sibling kept counting/nesting it inside the category's Today card checklist and count
+// badge regardless, since it feeds a different renderer (categoryCardHTML) that never got the same
+// check. This wraps categoryMemberTasksDueOn with that same exclusion for card/quick-view use.
+// Deliberately NOT applied to categoryMemberTasksDueOn itself — the slot picker
+// (renderSlotPickerCategoriesBody/pickCategoryForSlot) uses the raw due-today list on purpose, since
+// it's populating a checklist for a block that doesn't exist yet, so there's nothing yet to overlap
+// or escape from.
+function categoryMemberTasksDueOnForCard(group,name,dateKey){
+  return categoryMemberTasksDueOn(group,name,dateKey).filter(t=>!(effectiveTimeFor(t,dateKey)&&!categoryMemberOverlapsActiveBlock(t,dateKey)));
 }
 // Finds this category's own real, active calendar block (an isCategorySchedule task with an
 // effective time) sitting on dateKey, or null if it doesn't have one that day. Hoisted out of
